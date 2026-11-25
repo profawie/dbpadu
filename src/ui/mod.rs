@@ -1,9 +1,12 @@
 //! Pages and shared UI components.
 
+pub mod about;
 pub mod editor;
 pub mod highlight;
 pub mod home;
+pub mod log;
 pub mod query;
+pub mod settings;
 pub mod statusbar;
 pub mod tabs;
 pub mod tree;
@@ -79,6 +82,32 @@ pub fn kind_badge(ui: &mut egui::Ui, kind: DbKind, size: f32) -> egui::Response 
     response.on_hover_text(kind.label())
 }
 
+/// A color written as `#RRGGBB`.
+pub fn hex_color(text: &str) -> Option<Color32> {
+    let hex = text.strip_prefix('#')?;
+    if hex.len() != 6 {
+        return None;
+    }
+    let value = u32::from_str_radix(hex, 16).ok()?;
+    Some(Color32::from_rgb(
+        (value >> 16) as u8,
+        (value >> 8) as u8,
+        value as u8,
+    ))
+}
+
+/// A page's title with a line of explanation under it.
+pub fn page_title(ui: &mut egui::Ui, theme: &Theme, title: &str, about: &str) {
+    ui.label(RichText::new(title).size(24.0).strong());
+    ui.label(RichText::new(about).color(theme.text_dim));
+}
+
+/// The title of a part of a page.
+pub fn section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(6.0);
+    ui.label(RichText::new(title).size(16.0).strong());
+}
+
 /// The color of the dot that says how a connection is doing.
 pub fn link_color(theme: &Theme, link: Option<&Link>) -> Color32 {
     match link.map(|link| &link.state) {
@@ -128,6 +157,19 @@ mod tests {
             one_line("select *\n  from t\nLIMIT 5"),
             "select * from t LIMIT 5"
         );
+    }
+
+    #[test]
+    fn hex_colors_are_read() {
+        assert_eq!(
+            hex_color("#2F7FE0"),
+            Some(Color32::from_rgb(0x2F, 0x7F, 0xE0))
+        );
+        assert_eq!(hex_color("2F7FE0"), None);
+        assert_eq!(hex_color("#2F7F"), None);
+        for (_, color) in dbpadu_core::model::GROUP_COLORS {
+            assert!(hex_color(color).is_some(), "{color}");
+        }
     }
 
     #[test]

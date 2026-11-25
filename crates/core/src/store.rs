@@ -34,10 +34,20 @@ impl Store {
         };
         match fs::read_to_string(path) {
             Ok(text) => serde_json::from_str::<Data>(&text)
+                .map(|mut data| {
+                    data.sync_groups();
+                    data
+                })
                 .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err)),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Data::default()),
             Err(err) => Err(err),
         }
+    }
+
+    /// The folder the data file is in. Other files of the app, such as the
+    /// SSH known hosts, live next to it.
+    pub fn dir(&self) -> Option<PathBuf> {
+        self.path.as_ref()?.parent().map(PathBuf::from)
     }
 
     /// Write to a temporary file first, then rename, so the existing file

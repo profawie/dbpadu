@@ -36,10 +36,13 @@ final class Session {
     /** Statements run since the last commit or rollback, with auto-commit off. */
     private int pending;
     private volatile Statement running;
+    /** The SSH tunnel the connection goes through, if any. */
+    private final Tunnel tunnel;
 
-    Session(String id, String kind, Connection connection) {
+    Session(String id, String kind, Connection connection, Tunnel tunnel) {
         this.kind = kind;
         this.connection = connection;
+        this.tunnel = tunnel;
         this.worker = Executors.newSingleThreadExecutor(task -> {
             Thread thread = new Thread(task, "session-" + id);
             thread.setDaemon(true);
@@ -296,6 +299,84 @@ final class Session {
         return result;
     }
 
+    /** Functions and procedures of a schema. */
+    JsonObject routines(String mode, String schema) throws SQLException {
+        DatabaseMetaData meta = connection.getMetaData();
+        String catalog = "catalog".equals(mode) ? schema : null;
+        String schemaPattern = "schema".equals(mode) ? schema : null;
+        // Overloads share a name; each name is listed once per kind.
+        Set<String> seen = new HashSet<>();
+        JsonArray items = new JsonArray();
+        try (ResultSet rows = meta.getFunctions(catalog, schemaPattern, "%")) {
+            while (rows.next()) {
+                addRoutine(items, seen, rows.getString("FUNCTION_NAME"), "function");
+            }
+        } catch (SQLException | AbstractMethodError notSupported) {
+            // Some drivers only know procedures.
+        }
+        try (ResultSet rows = meta.getProcedures(catalog, schemaPattern, "%")) {
+            while (rows.next()) {
+                String name = rows.getString("PROCEDURE_NAME");
+                // Drivers that list functions as procedures too.
+                if (!seen.contains("function:" + name)) {
+                    addRoutine(items, seen, name, "procedure");
+                }
+            }
+        }
+        JsonObject result = new JsonObject();
+        result.add("items", items);
+        return result;
+    }
+
+    private static void addRoutine(JsonArray items, Set<String> seen, String name, String kind) {
+        if (name == null) {
+            return;
+        }
+        // SQL Server adds ";1" to the name.
+        int version = name.indexOf(';');
+        String clean = version > 0 ? name.substring(0, version) : name;
+        if (seen.add(kind + ":" + clean)) {
+            JsonObject routine = new JsonObject();
+            routine.addProperty("name", clean);
+            routine.addProperty("kind", kind);
+            items.add(routine);
+        }
+    }
+
+    /**
+     * Sequences of a schema. JDBC has no common way to list them, so each
+     * database is asked in its own way. Databases without sequences give an
+     * empty list.
+     */
+    JsonObject sequences(String schema) throws SQLException {
+        String sql = switch (kind == null ? "" : kind) {
+            case "postgres", "sqlserver" ->
+                "SELECT sequence_name FROM information_schema.sequences"
+                    + " WHERE sequence_schema = ? ORDER BY sequence_name";
+            case "mariadb" ->
+                "SELECT table_name FROM information_schema.tables"
+                    + " WHERE table_schema = ? AND table_type = 'SEQUENCE' ORDER BY table_name";
+            case "oracle" ->
+                "SELECT sequence_name FROM all_sequences"
+                    + " WHERE sequence_owner = ? ORDER BY sequence_name";
+            default -> null;
+        };
+        JsonArray items = new JsonArray();
+        if (sql != null) {
+            try (java.sql.PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, schema);
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        items.add(rows.getString(1));
+                    }
+                }
+            }
+        }
+        JsonObject result = new JsonObject();
+        result.add("items", items);
+        return result;
+    }
+
     private static String quote(DatabaseMetaData meta) throws SQLException {
         String quote = meta.getIdentifierQuoteString();
         return quote == null || quote.isBlank() ? "\"" : quote.trim();
@@ -323,6 +404,9 @@ final class Session {
             connection.close();
         } catch (SQLException ignored) {
             // Already gone.
+        }
+        if (tunnel != null) {
+            tunnel.close();
         }
     }
 }

@@ -6,6 +6,24 @@
 
 use uuid::Uuid;
 
+/// Which secret of a connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Secret {
+    /// The database password.
+    Password,
+    /// The SSH password, or the passphrase of the SSH key.
+    Ssh,
+}
+
+impl Secret {
+    fn prefix(self) -> &'static str {
+        match self {
+            Secret::Password => "password",
+            Secret::Ssh => "ssh",
+        }
+    }
+}
+
 /// Service name the entries are filed under in the credential store.
 pub const SERVICE: &str = crate::APP_NAME;
 
@@ -33,28 +51,28 @@ impl Secrets {
         self.available
     }
 
-    fn entry(&self, connection: Uuid) -> Result<keyring::Entry, String> {
+    fn entry(&self, connection: Uuid, secret: Secret) -> Result<keyring::Entry, String> {
         if !self.available {
             return Err("This system has no credential store.".to_string());
         }
-        keyring::Entry::new(SERVICE, &format!("password:{connection}"))
+        keyring::Entry::new(SERVICE, &format!("{}:{connection}", secret.prefix()))
             .map_err(|err| err.to_string())
     }
 
-    /// The saved password of a connection, if there is one.
-    pub fn get(&self, connection: Uuid) -> Option<String> {
-        self.entry(connection).ok()?.get_password().ok()
+    /// A saved secret of a connection, if there is one.
+    pub fn get(&self, connection: Uuid, secret: Secret) -> Option<String> {
+        self.entry(connection, secret).ok()?.get_password().ok()
     }
 
-    pub fn set(&self, connection: Uuid, password: &str) -> Result<(), String> {
-        self.entry(connection)?
-            .set_password(password)
+    pub fn set(&self, connection: Uuid, secret: Secret, value: &str) -> Result<(), String> {
+        self.entry(connection, secret)?
+            .set_password(value)
             .map_err(|err| err.to_string())
     }
 
-    /// Forget the password. Not an error if none was saved.
-    pub fn delete(&self, connection: Uuid) {
-        if let Ok(entry) = self.entry(connection) {
+    /// Forget a secret. Not an error if none was saved.
+    pub fn delete(&self, connection: Uuid, secret: Secret) {
+        if let Ok(entry) = self.entry(connection, secret) {
             let _ = entry.delete_credential();
         }
     }

@@ -19,7 +19,7 @@ fn ask(engine: &mut Engine, (op, params): (&str, Value)) -> Result<Value, String
         for event in engine.poll() {
             match event {
                 Event::Answer { id, result } if id == sent => return result,
-                Event::Answer { .. } => {}
+                Event::Answer { .. } | Event::Log(_) => {}
                 Event::Stopped(why) => panic!("engine stopped: {why}"),
             }
         }
@@ -49,7 +49,21 @@ fn select_is_always_limited() {
         url: &url,
         user: "",
         password: "",
+        ssh: None,
+        driver_jar: "",
+        driver_class: "",
     };
+
+    let hello: protocol::Hello =
+        protocol::read(ask(&mut engine, protocol::hello()).unwrap()).unwrap();
+    assert_eq!(hello.version, env!("CARGO_PKG_VERSION"));
+    let sqlite = hello
+        .drivers
+        .iter()
+        .find(|driver| driver.kind == "sqlite")
+        .expect("the SQLite driver is listed");
+    assert_eq!(sqlite.class_name, "org.sqlite.JDBC");
+    assert!(sqlite.version.starts_with(|c: char| c.is_ascii_digit()));
 
     let connected: Connected =
         protocol::read(ask(&mut engine, protocol::connect("s", &target)).unwrap()).unwrap();

@@ -1,4 +1,4 @@
-//! The dbpadu logo: the window icon and the mark shown inside the app.
+//! The dbpadu logo, as the icon of the window.
 //!
 //! `assets/icon/dbpadu.svg` is the source drawing. The Windows program
 //! carries `dbpadu.ico` (see `build.rs`) and the macOS app carries
@@ -20,17 +20,6 @@ pub fn window_icon() -> egui::IconData {
     #[cfg(not(target_os = "macos"))]
     let png = LOGO_PNG;
     eframe::icon_data::from_png_bytes(png).expect("the bundled icon is a valid PNG")
-}
-
-/// The logo as a texture, for drawing it in the app.
-pub fn logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
-    let icon =
-        eframe::icon_data::from_png_bytes(LOGO_PNG).expect("the bundled logo is a valid PNG");
-    let image = egui::ColorImage::from_rgba_unmultiplied(
-        [icon.width as usize, icon.height as usize],
-        &icon.rgba,
-    );
-    ctx.load_texture("dbpadu-logo", image, egui::TextureOptions::LINEAR)
 }
 
 #[cfg(test)]

@@ -11,6 +11,50 @@ pub struct Hello {
     pub java: String,
     /// The most rows the engine returns, whatever it is asked.
     pub max_rows: u32,
+    /// The JDBC drivers inside the engine.
+    pub drivers: Vec<Driver>,
+}
+
+/// A JDBC driver inside the engine.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Driver {
+    /// The kind of database it is for, as the engine names it.
+    pub kind: String,
+    pub name: String,
+    /// Where it comes from: `group:artifact` on Maven Central.
+    pub package: String,
+    pub class_name: String,
+    pub version: String,
+}
+
+/// What the engine found in a driver jar of the user's own.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct OwnDriverInfo {
+    pub class_name: String,
+    pub version: String,
+}
+
+/// A function or a procedure.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Routine {
+    pub name: String,
+    /// `function` or `procedure`.
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Routines {
+    pub items: Vec<Routine>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Sequences {
+    pub items: Vec<String>,
 }
 
 /// Whether changes are committed one by one, and what is waiting.
@@ -130,12 +174,60 @@ pub fn read<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
         .map_err(|err| format!("The engine's answer could not be read: {err}"))
 }
 
+/// An SSH server to go through.
+pub struct SshTarget<'a> {
+    pub host: &'a str,
+    pub port: u16,
+    pub user: &'a str,
+    /// Private key file; empty to sign in with a password.
+    pub key_file: &'a str,
+    /// The password, or the passphrase of the key.
+    pub secret: &'a str,
+    /// File that remembers the keys of servers seen before.
+    pub known_hosts: &'a str,
+    /// The database, as seen from the SSH server.
+    pub remote_host: &'a str,
+    pub remote_port: u16,
+}
+
 /// How to reach a database.
 pub struct Target<'a> {
     pub kind: &'a str,
     pub url: &'a str,
     pub user: &'a str,
     pub password: &'a str,
+    pub ssh: Option<SshTarget<'a>>,
+    /// The user's own driver jar; empty for the driver inside the engine.
+    pub driver_jar: &'a str,
+    pub driver_class: &'a str,
+}
+
+impl Target<'_> {
+    fn json(&self) -> Value {
+        let mut value = json!({
+            "kind": self.kind,
+            "url": self.url,
+            "user": self.user,
+            "password": self.password,
+        });
+        if let Some(ssh) = &self.ssh {
+            value["ssh"] = json!({
+                "host": ssh.host,
+                "port": ssh.port,
+                "user": ssh.user,
+                "keyFile": ssh.key_file,
+                "secret": ssh.secret,
+                "knownHosts": ssh.known_hosts,
+                "remoteHost": ssh.remote_host,
+                "remotePort": ssh.remote_port,
+            });
+        }
+        if !self.driver_jar.is_empty() {
+            value["driverJar"] = json!(self.driver_jar);
+            value["driverClass"] = json!(self.driver_class);
+        }
+        value
+    }
 }
 
 /// A request: the operation and its parameters.
@@ -146,17 +238,32 @@ pub fn hello() -> Request {
 }
 
 pub fn test(target: &Target) -> Request {
-    (
-        "test",
-        json!({"kind": target.kind, "url": target.url, "user": target.user, "password": target.password}),
-    )
+    ("test", target.json())
 }
 
 pub fn connect(session: &str, target: &Target) -> Request {
+    let mut value = target.json();
+    value["session"] = json!(session);
+    ("connect", value)
+}
+
+/// Look into a driver jar of the user's own.
+pub fn driver_info(jar: &str, class_name: &str) -> Request {
     (
-        "connect",
-        json!({"session": session, "kind": target.kind, "url": target.url, "user": target.user, "password": target.password}),
+        "driverInfo",
+        json!({"driverJar": jar, "driverClass": class_name}),
     )
+}
+
+pub fn routines(session: &str, mode: &str, schema: &str) -> Request {
+    (
+        "routines",
+        json!({"session": session, "mode": mode, "schema": schema}),
+    )
+}
+
+pub fn sequences(session: &str, schema: &str) -> Request {
+    ("sequences", json!({"session": session, "schema": schema}))
 }
 
 pub fn disconnect(session: &str) -> Request {
