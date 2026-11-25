@@ -1,7 +1,6 @@
 package io.github.profawie.dbpadu.engine;
 
 import com.google.gson.Gson;
-import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -13,12 +12,10 @@ import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
-import java.sql.Driver;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.Map;
 import java.util.Properties;
-import java.util.ServiceLoader;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -78,7 +75,8 @@ public final class Main {
         String op = text(request, "op");
         try {
             switch (op == null ? "" : op) {
-                case "hello", "test", "connect" -> POOL.execute(() -> run(id, () -> general(op, request)));
+                case "hello", "test", "connect", "driverInfo" ->
+                    POOL.execute(() -> run(id, () -> general(op, request)));
                 // Must not wait behind the statement it is meant to stop.
                 case "cancel" -> run(id, () -> {
                     session(request).cancel();
@@ -88,6 +86,7 @@ public final class Main {
                     Session session = SESSIONS.remove(text(request, "session"));
                     if (session != null) {
                         session.close();
+                        System.err.println("[engine] disconnected " + text(request, "session"));
                     }
                     return new JsonObject();
                 });
@@ -129,6 +128,10 @@ public final class Main {
         if (problem instanceof OutOfMemoryError) {
             return "The engine ran out of memory. Use a smaller row limit.";
         }
+        if (!(problem instanceof SQLException)) {
+            // Unexpected: keep the details for the engine log.
+            problem.printStackTrace();
+        }
         String message = problem.getMessage();
         if (message == null || message.isBlank()) {
             return problem.getClass().getSimpleName();
@@ -152,15 +155,14 @@ public final class Main {
                 result.addProperty("version", version == null ? "dev" : version);
                 result.addProperty("java", System.getProperty("java.version"));
                 result.addProperty("maxRows", Session.MAX_ROWS);
-                JsonArray drivers = new JsonArray();
-                for (Driver driver : ServiceLoader.load(Driver.class)) {
-                    drivers.add(driver.getClass().getName());
-                }
-                result.add("drivers", drivers);
+                result.add("drivers", Drivers.bundled());
                 return result;
             }
+            case "driverInfo" -> {
+                return Drivers.describe(text(request, "driverJar"), text(request, "driverClass"));
+            }
             case "test" -> {
-                Session session = new Session("test", text(request, "kind"), open(request));
+                Session session = open("test", request);
                 try {
                     return session.info();
                 } finally {
@@ -169,17 +171,22 @@ public final class Main {
             }
             default -> {
                 String id = text(request, "session");
-                Session session = new Session(id, text(request, "kind"), open(request));
+                Session session = open(id, request);
                 Session old = SESSIONS.put(id, session);
                 if (old != null) {
                     old.close();
                 }
-                return session.info();
+                JsonObject info = session.info();
+                System.err.println(
+                    "[engine] connected " + id + " to " + info.get("product").getAsString()
+                        + " " + info.get("version").getAsString());
+                return info;
             }
         }
     }
 
-    private static Connection open(JsonObject request) throws SQLException {
+    /** Open the SSH tunnel, if one is asked for, then the connection. */
+    private static Session open(String id, JsonObject request) throws SQLException {
         Properties properties = new Properties();
         String user = text(request, "user");
         String password = text(request, "password");
@@ -189,7 +196,22 @@ public final class Main {
         if (password != null && !password.isEmpty()) {
             properties.setProperty("password", password);
         }
-        return DriverManager.getConnection(text(request, "url"), properties);
+        String url = text(request, "url");
+        Tunnel tunnel = null;
+        if (request.has("ssh") && request.get("ssh").isJsonObject()) {
+            tunnel = Tunnel.open(request.getAsJsonObject("ssh"));
+            url = url.replace(Tunnel.PORT_PLACEHOLDER, String.valueOf(tunnel.localPort));
+        }
+        try {
+            Connection connection = Drivers.connect(
+                url, properties, text(request, "driverJar"), text(request, "driverClass"));
+            return new Session(id, text(request, "kind"), connection, tunnel);
+        } catch (SQLException | RuntimeException problem) {
+            if (tunnel != null) {
+                tunnel.close();
+            }
+            throw problem;
+        }
     }
 
     private static JsonObject inSession(Session session, String op, JsonObject request) throws SQLException {
@@ -201,6 +223,8 @@ public final class Main {
             case "rollback" -> wrapTx(session.rollback());
             case "schemas" -> session.schemas();
             case "tables" -> session.tables(text(request, "mode"), text(request, "schema"));
+            case "routines" -> session.routines(text(request, "mode"), text(request, "schema"));
+            case "sequences" -> session.sequences(text(request, "schema"));
             case "columns" -> session.columns(
                 text(request, "mode"), text(request, "schema"), text(request, "table"));
             default -> throw new SQLException("Unknown request: " + op);

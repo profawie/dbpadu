@@ -1,6 +1,6 @@
 //! The bar at the bottom. From the left: what the last run gave, and the
 //! SQL as it was really sent to the database, with anything dbpadu added
-//! marked. From the right: the engine, then the transaction.
+//! marked. From the right: the engine, the log switch, then the transaction.
 
 use eframe::egui::{self, RichText};
 
@@ -14,6 +14,7 @@ use crate::{
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let theme = app.theme;
     let mut restart = false;
+    let mut toggle_log = false;
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         // Far right: the engine.
         let (color, text, hover) = match &app.engine_state {
@@ -51,6 +52,28 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             restart = true;
         }
         super::dot(ui, color);
+
+        // Next to it: opens and closes the log.
+        ui.separator();
+        let open = app.data.settings.log_open;
+        let log = ui
+            .add(
+                egui::Label::new(RichText::new("Log").small().color(if open {
+                    theme.accent_text
+                } else {
+                    theme.text_dim
+                }))
+                .sense(egui::Sense::click()),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(if open {
+                "Hide the SQL and engine log"
+            } else {
+                "Show the SQL and engine log"
+            });
+        if log.clicked() {
+            toggle_log = true;
+        }
 
         // Next to it: the transaction of the connection that is shown.
         let tab = app.current_tab();
@@ -103,6 +126,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     });
     if restart {
         app.start_engine();
+    }
+    if toggle_log {
+        app.set_log_open(!app.data.settings.log_open);
     }
 }
 

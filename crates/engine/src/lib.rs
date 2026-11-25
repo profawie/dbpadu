@@ -39,6 +39,8 @@ pub enum Event {
         id: u64,
         result: Result<Value, String>,
     },
+    /// A line the engine or one of its drivers wrote to its error output.
+    Log(String),
     /// The engine is no longer running. The text is what it last wrote to
     /// its error output, if anything.
     Stopped(String),
@@ -84,21 +86,30 @@ impl Engine {
         // The last lines of the error output explain why an engine stopped.
         let errors = Arc::new(Mutex::new(VecDeque::<String>::new()));
         let kept = errors.clone();
+        let (sender, events) = mpsc::channel();
+        let log = sender.clone();
+        let wake = Arc::new(wake);
+        let wake_log = wake.clone();
         thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 // The JVM announces its options there; that is not an error.
                 if line.starts_with("Picked up ") {
                     continue;
                 }
-                let mut kept = kept.lock().expect("no panic while held");
-                if kept.len() == 12 {
-                    kept.pop_front();
+                {
+                    let mut kept = kept.lock().expect("no panic while held");
+                    if kept.len() == 12 {
+                        kept.pop_front();
+                    }
+                    kept.push_back(line.clone());
                 }
-                kept.push_back(line);
+                if log.send(Event::Log(line)).is_err() {
+                    return;
+                }
+                wake_log();
             }
         });
 
-        let (sender, events) = mpsc::channel();
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 let Some(event) = parse_answer(&line) else {

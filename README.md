@@ -4,32 +4,39 @@
 
 A friendly desktop database client. The app is written in Rust; the query engine is written in Java and talks to databases through JDBC. Runs on Windows, macOS and Linux.
 
-Version: 0.1.0
+Version: 0.1.1
 
 | Connections | A query |
 | --- | --- |
 | ![One card for each connection](docs/connections.png) | ![A formatted query, its result and the status bar](docs/query.png) |
 | ![Rows of a table, opened from the tree](docs/table.png) | ![The connection form](docs/new-connection.png) |
+| ![Settings, with the JDBC drivers](docs/settings.png) | |
 
 ## Features
 
 | Feature | Status |
 | --- | --- |
 | One card for each connection, with search; Connect, New query, Edit and Disconnect on the card | Done |
-| Connection form in one step: pick the database type, fill in host, port, database, user and password; the port, user and driver settings are filled in for the type; **Test connection** before saving | Done |
+| Groups and groups inside groups (for example Company1 › Production › prod1), each with a color that shows on its cards, in the tree and under its query tabs | Done |
+| Connection form in one step: pick the database type from the list at the left, fill in host, port, database, user and password; the port, user and driver settings are filled in for the type; **Test connection** before saving | Done |
+| The form names the JDBC driver that will be used: name, package and version | Done |
+| SSH tunnel for a database that is only reachable from another computer: sign in with a password or a private key file (see [SSH](#ssh)) | Done |
 | PostgreSQL, MySQL, MariaDB, SQL Server, Oracle and SQLite; every driver is inside the engine, nothing to download | Done |
-| Tabs: the pinned Connections tab, then any number of query tabs for each connection | Done |
-| Tree on the left: connections, schemas, tables, views and columns (type, key, not null), with a filter; double-click a table to see its rows | Done |
+| Your own JDBC driver for a database type: choose a newer or another `.jar` file in Settings | Done |
+| Tabs: the pinned Connections tab, then any number of query tabs for each connection; version, Settings and About at the right | Done |
+| Tree on the left: groups, connections, schemas, then Tables, Views, Routines and Sequences, with columns (type, key, not null) under a table and a filter; double-click a table or view to see its rows | Done |
 | **A SELECT is always limited** (see [Row limit](#row-limit)) | Done |
 | SQL editor with colors; Run the statement at the cursor or the selected text (Ctrl+Enter or F5); Stop a running query | Done |
 | Format SQL (Ctrl+Shift+F) | Done |
 | Result grid with resizable columns, row numbers, NULL shown apart, copy a value | Done |
-| Status bar: result and time, the SQL as it was really sent with what dbpadu added marked, the transaction, and the engine at the far right | Done |
+| Log at the bottom, read-only: the SQL as it was sent with its result, and what the engine said; Copy all, Clear, Hide | Done |
+| Status bar: result and time, the SQL as it was really sent with what dbpadu added marked, the transaction, the log switch, and the engine at the far right | Done |
 | Transactions: Auto-commit on or off for each connection, Commit and Rollback | Done |
 | Passwords in the operating system's credential store (opt-in), never in a file | Done |
-| Dark, light or system look | Done |
+| Settings: dark, light or system look, max rows of a new tab, the Java to run the engine with, JDBC drivers | Done |
+| About: versions, the drivers in use, where the files are | Done |
 | App icon: the window, the Windows program and the macOS app | Done |
-| Edit cells in the grid, export results, query history, SSH tunnel | Planned |
+| Edit cells in the grid, export results, query history | Planned |
 
 ## Row limit
 
@@ -40,6 +47,16 @@ A table can hold more rows than a computer has memory for, so dbpadu never asks 
 
 The limit is chosen per tab with **Max rows** (100 to 10,000; 500 to start with). The engine refuses more than 10,000 rows whatever it is asked, cuts a single value at 10,000 characters and runs with at most 512 MB of memory. When a result stops at the limit, the line above it says the table may have more.
 
+## SSH
+
+On the **SSH** page of the connection form, switch on **Connect through an SSH server** and fill in the server, the user name and a password or a private key file. The engine signs in to that server and reaches the database from there; **Host** and **Port** on the Main page are then the database as the SSH server sees it. The tunnel listens on this computer only, on a free port, and closes with the connection.
+
+The first time a server is used, its key is remembered in `known_hosts` next to `data.json` (About shows the path). If the key ever changes, dbpadu refuses to connect; when the change is expected, remove that server's line from the file.
+
+## JDBC drivers
+
+The engine carries one driver for each database type. Settings and About list their name, package and version. To use another version, download the driver's `.jar` file and choose it under **Settings › JDBC drivers**; **Check** shows the driver class and version found in the file. The driver class is found by itself; fill it in only for a jar that does not name it. Your own driver is used for connections opened from then on, and **Use the one inside dbpadu** goes back.
+
 ## How the two parts talk
 
 The app starts the engine as a child process (`java -jar dbpadu-engine.jar`) and the two talk over the engine's standard input and output, one JSON object per line. No network port is opened. The engine stops when the app closes; changes that were not committed are rolled back.
@@ -49,7 +66,7 @@ app    → {"id": 7, "op": "execute", "session": "…", "sql": "select * from t"
 engine → {"id": 7, "ok": true, "result": {"executedSql": "select * from t\nLIMIT 500", "added": "LIMIT 500", …}}
 ```
 
-The engine status at the bottom right says whether it is ready. If it stopped, click the status to start it again; rest the pointer on it for the reason.
+The engine status at the bottom right says whether it is ready. If it stopped, click the status to start it again; rest the pointer on it for the reason. What the engine writes to its error output is shown in the **Engine** log.
 
 ## Build and run
 
@@ -111,10 +128,10 @@ cd engine && ./mvnw test      # the engine
 
 | Part | What it does |
 | --- | --- |
-| `dbpadu` (`src/`) | The desktop app: cards, tabs, tree, query tabs, status bar, themes. Built with [egui/eframe](https://github.com/emilk/egui) |
-| `dbpadu-core` (`crates/core`) | Saved connections and settings, saved passwords, SQL formatting, finding the statement at the cursor |
+| `dbpadu` (`src/`) | The desktop app: cards and groups, tabs, tree, query tabs, log, status bar, Settings, About, themes. Built with [egui/eframe](https://github.com/emilk/egui) |
+| `dbpadu-core` (`crates/core`) | Saved connections, groups and settings, saved passwords, SQL formatting, finding the statement at the cursor |
 | `dbpadu-engine` (`crates/engine`) | Starts the Java engine and talks to it |
-| The engine (`engine/`) | Java: connections, running SQL, the row limit, transactions, reading schemas and tables |
+| The engine (`engine/`) | Java: connections, SSH tunnels, drivers, running SQL, the row limit, transactions, reading schemas, tables, routines and sequences |
 
 Third-party Rust libraries are declared once, under `[workspace.dependencies]` in the root `Cargo.toml`; the engine's are in `engine/pom.xml`. The version is in both files and must be the same.
 
@@ -122,6 +139,6 @@ Third-party Rust libraries are declared once, under `[workspace.dependencies]` i
 
 Connections and settings are stored as JSON in the per-user config folder (`%APPDATA%\dbpadu\config\data.json` on Windows, `~/Library/Application Support/dbpadu/data.json` on macOS, `~/.config/dbpadu/data.json` on Linux). Passwords are never written to this file.
 
-A password is asked for when connecting and kept in memory until the app closes. If you tick "Remember", it is saved in the operating system's credential store (Windows Credential Manager or the macOS Keychain).
+A password is asked for when connecting and kept in memory until the app closes. If you tick "Remember", it is saved in the operating system's credential store (Windows Credential Manager or the macOS Keychain). The same goes for an SSH password or the passphrase of an SSH key.
 
 A new SQL Server connection starts with `encrypt=true;trustServerCertificate=true` under **More settings**, because the driver insists on encryption and most development servers have a certificate it cannot check. For a server with a proper certificate, remove `trustServerCertificate=true`.
