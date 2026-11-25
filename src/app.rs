@@ -166,6 +166,8 @@ pub struct App {
     /// Passwords typed in this run of the app, so a reconnect does not ask
     /// again. Never written anywhere.
     passwords: HashMap<Uuid, String>,
+    /// The dbpadu logo, drawn at the top of the tree.
+    pub logo: egui::TextureHandle,
 }
 
 /// The app's look for the `appearance` setting.
@@ -235,6 +237,7 @@ impl App {
             tree_filter: String::new(),
             search: String::new(),
             passwords: HashMap::new(),
+            logo: crate::icon::logo_texture(&cc.egui_ctx),
         };
         app.start_engine();
         app

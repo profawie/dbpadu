@@ -11,6 +11,7 @@
 //! - the query engine itself (`engine/`), written in Java
 
 mod app;
+mod icon;
 mod theme;
 mod ui;
 
@@ -21,6 +22,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title(APP_NAME)
+            .with_icon(icon::window_icon())
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([900.0, 560.0]),
         ..Default::default()
