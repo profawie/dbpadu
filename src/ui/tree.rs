@@ -122,6 +122,7 @@ fn note(ui: &mut egui::Ui, depth: usize, text: &str, color: Color32) {
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let theme = app.theme;
     ui.horizontal(|ui| {
+        ui.add(egui::Image::new(&app.logo).fit_to_exact_size(egui::vec2(24.0, 24.0)));
         ui.label(RichText::new(crate::APP_NAME).size(18.0).strong());
         ui.label(
             RichText::new(format!("v{}", crate::APP_VERSION))

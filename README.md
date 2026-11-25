@@ -1,3 +1,5 @@
+<img src="assets/icon/dbpadu-256.png" alt="dbpadu logo" width="96">
+
 # dbpadu
 
 A friendly desktop database client. The app is written in Rust; the query engine is written in Java and talks to databases through JDBC. Runs on Windows, macOS and Linux.
@@ -26,7 +28,8 @@ Version: 0.1.0
 | Transactions: Auto-commit on or off for each connection, Commit and Rollback | Done |
 | Passwords in the operating system's credential store (opt-in), never in a file | Done |
 | Dark, light or system look | Done |
-| Edit cells in the grid, export results, query history, SSH tunnel, app icon | Planned |
+| App icon: the window, the Windows program and the macOS app | Done |
+| Edit cells in the grid, export results, query history, SSH tunnel | Planned |
 
 ## Row limit
 

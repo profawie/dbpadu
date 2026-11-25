@@ -67,6 +67,9 @@ build_windows() {
   Debian/Ubuntu: sudo apt install gcc-mingw-w64-x86-64
   Fedora:        sudo dnf install mingw64-gcc
   macOS:         brew install mingw-w64"
+    # windres puts the icon into the .exe. It comes with the same packages.
+    command -v x86_64-w64-mingw32-windres >/dev/null 2>&1 ||
+        fail "x86_64-w64-mingw32-windres is missing. It is part of the MinGW-w64 packages above."
 
     if command -v rustup >/dev/null 2>&1; then
         rustup target list --installed | grep -qx "$WINDOWS_TARGET" ||
@@ -103,6 +106,7 @@ build_macos() {
     cp "target/release/$APP" "$bundle/Contents/MacOS/$APP"
     # The program looks for the engine in Contents/Resources.
     cp "engine/target/$JAR" "$bundle/Contents/Resources/$JAR"
+    cp "assets/icon/$APP.icns" "$bundle/Contents/Resources/$APP.icns"
     cat >"$bundle/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -112,6 +116,7 @@ build_macos() {
     <key>CFBundleDisplayName</key><string>$APP</string>
     <key>CFBundleIdentifier</key><string>io.github.profawie.$APP</string>
     <key>CFBundleExecutable</key><string>$APP</string>
+    <key>CFBundleIconFile</key><string>$APP</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleVersion</key><string>$(version)</string>
     <key>CFBundleShortVersionString</key><string>$(version)</string>

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <title>dbpadu</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#16212F"/>
+      <stop offset="1" stop-color="#070B10"/>
+    </linearGradient>
+    <linearGradient id="db" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6CB6FF"/>
+      <stop offset="1" stop-color="#1F7FD6"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="228" fill="url(#bg)"/>
+  <rect x="14" y="14" width="996" height="996" rx="214" fill="none" stroke="#58A6FF" stroke-opacity="0.35" stroke-width="28"/>
+  <!-- A database: three stacked discs. -->
+  <g fill="none" stroke="url(#db)" stroke-width="64" stroke-linecap="round" stroke-linejoin="round">
+    <ellipse cx="512" cy="318" rx="250" ry="96"/>
+    <path d="M262 318 V706 A250 96 0 0 0 762 706 V318"/>
+    <path d="M262 512 A250 96 0 0 0 762 512"/>
+  </g>
+  <!-- One row, safely limited: the green bar. -->
+  <rect x="394" y="662" width="236" height="76" rx="24" fill="#33FF66"/>
+</svg>
