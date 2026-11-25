@@ -1,0 +1,10 @@
+/target
+/engine/target
+/dist
+.DS_Store
+*.swp
+# Programs the build scripts copy next to themselves
+/dbpadu
+/dbpadu.exe
+/dbpadu.app
+/dbpadu-engine.jar

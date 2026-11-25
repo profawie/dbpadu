@@ -1,0 +1,12 @@
+[package]
+name = "dbpadu-engine"
+description = "Starts dbpadu's Java query engine and talks to it"
+publish = false
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
