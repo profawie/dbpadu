@@ -179,6 +179,17 @@ pub fn read<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
         .map_err(|err| format!("The engine's answer could not be read: {err}"))
 }
 
+/// A jump server: an SSH server on the way to the one of the tunnel.
+pub struct JumpTarget<'a> {
+    pub host: &'a str,
+    pub port: u16,
+    pub user: &'a str,
+    /// Private key file; empty to sign in with a password.
+    pub key_file: &'a str,
+    /// The password, or the passphrase of the key.
+    pub secret: &'a str,
+}
+
 /// An SSH server to go through.
 pub struct SshTarget<'a> {
     pub host: &'a str,
@@ -193,6 +204,9 @@ pub struct SshTarget<'a> {
     /// The database, as seen from the SSH server.
     pub remote_host: &'a str,
     pub remote_port: u16,
+    /// Servers to go through to reach `host`; the first is reached from
+    /// this computer.
+    pub jumps: Vec<JumpTarget<'a>>,
 }
 
 /// How to reach a database.
@@ -228,6 +242,13 @@ impl Target<'_> {
                 "knownHosts": ssh.known_hosts,
                 "remoteHost": ssh.remote_host,
                 "remotePort": ssh.remote_port,
+                "jumps": ssh.jumps.iter().map(|jump| json!({
+                    "host": jump.host,
+                    "port": jump.port,
+                    "user": jump.user,
+                    "keyFile": jump.key_file,
+                    "secret": jump.secret,
+                })).collect::<Vec<_>>(),
             });
         }
         if !self.driver_jars.is_empty() {

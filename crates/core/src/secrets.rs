@@ -13,13 +13,16 @@ pub enum Secret {
     Password,
     /// The SSH password, or the passphrase of the SSH key.
     Ssh,
+    /// The same for a jump server, named by its id.
+    Jump(Uuid),
 }
 
 impl Secret {
-    fn prefix(self) -> &'static str {
+    fn prefix(self) -> String {
         match self {
-            Secret::Password => "password",
-            Secret::Ssh => "ssh",
+            Secret::Password => "password".to_string(),
+            Secret::Ssh => "ssh".to_string(),
+            Secret::Jump(jump) => format!("jump-{jump}"),
         }
     }
 }

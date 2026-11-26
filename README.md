@@ -4,7 +4,7 @@
 
 A friendly desktop database client. The app is written in Rust; the query engine is written in Java and talks to databases through JDBC. Runs on Windows, macOS and Linux.
 
-Version: 0.2.0
+Version: 0.2.1
 
 | Connections | A query |
 | --- | --- |
@@ -22,6 +22,7 @@ Version: 0.2.0
 | Connection form in one step: pick the driver from the list at the left (name and version), fill in host, port, database, user and password; the port, user and driver settings are filled in for the driver; **Test connection** before saving | Done |
 | The form names the JDBC driver that will be used: name, package or class, and version | Done |
 | SSH tunnel for a database that is only reachable from another computer: sign in with a password or a private key file (see [SSH](#ssh)) | Done |
+| Jump servers (ProxyJump) in front of the SSH server, any number of them | Done |
 | PostgreSQL, MySQL, MariaDB, SQL Server, Oracle and SQLite; every driver is inside the engine, nothing to download | Done |
 | Drivers page: add, edit, duplicate and delete JDBC drivers of your own, with name, version, class, URL template, default port, `.jar` files and connection properties (see [JDBC drivers](#jdbc-drivers)) | Done |
 | Several versions of a driver side by side, for example MySQL 5 and MySQL 8; each connection names the one it uses | Done |
@@ -53,6 +54,12 @@ The limit is chosen per tab with **Max rows** (100 to 10,000; 500 to start with)
 ## SSH
 
 On the **SSH** page of the connection form, switch on **Connect through an SSH server** and fill in the server, the user name and a password or a private key file. The engine signs in to that server and reaches the database from there; **Host** and **Port** on the Main page are then the database as the SSH server sees it. The tunnel listens on this computer only, on a free port, and closes with the connection.
+
+### Jump servers
+
+When this computer cannot reach the SSH server itself, add one or more **jump servers** under it on the same page (what OpenSSH calls ProxyJump, and termker a jump host). dbpadu signs in to the first jump server, reaches the next one from there, and so on up to the SSH server, which reaches the database. Each jump server has its own host, port, user name and password or private key file. What is sent through a jump server is encrypted end to end, so it cannot read it. A jump server must allow forwarding (`AllowTcpForwarding` in its SSH server settings), and the address of the next server must be one that works from the jump server.
+
+An error such as `Connection refused` for the SSH server usually means it is only reachable through a jump server.
 
 The first time a server is used, its key is remembered in `known_hosts` next to `data.json` (About shows the path). If the key ever changes, dbpadu refuses to connect; when the change is expected, remove that server's line from the file.
 
