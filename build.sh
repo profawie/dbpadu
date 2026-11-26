@@ -5,9 +5,16 @@
 #   ./build.sh --windows  build a Windows .exe with the GNU toolchain
 #                         (MinGW-w64), from macOS or Linux
 #
-# A release is two files that stay together: the program and
-# dbpadu-engine.jar, the Java query engine. Both are also copied to this
-# folder, so ./dbpadu can be run straight away.
+# Everything that is built ends up in dist/, and stays together:
+#
+#   dbpadu (dbpadu.exe)   the program, which only opens the window
+#   dbpadu_ui, dbpadu_engine, dbpadu_core
+#                         the app's own libraries (.so, .dll or .dylib)
+#   std-...               Rust's standard library, shared by the three
+#   dbpadu-engine.jar     the Java query engine, one file
+#
+# dist/dbpadu can be run straight away. The same files are packed in a
+# .tar.gz (Linux) or .zip (Windows, macOS) next to them.
 #
 # Needs Rust (https://rustup.rs) and a JDK, version 17 or newer
 # (https://adoptium.net). Maven is downloaded by engine/mvnw.
@@ -22,7 +29,7 @@ JAR=dbpadu-engine.jar
 WINDOWS_TARGET=x86_64-pc-windows-gnu
 
 usage() {
-    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 fail() {
@@ -61,6 +68,32 @@ build_engine() {
     [ -f "engine/target/$JAR" ] || fail "the engine was not built: engine/target/$JAR is missing"
 }
 
+# Rust's standard library as a shared library, for the target named (none:
+# this computer). The app's libraries share this one copy.
+std_library() {
+    local dir file
+    dir=$(rustc --print target-libdir ${1:+--target "$1"})
+    for file in "$dir"/libstd-*.so "$dir"/libstd-*.dylib "$dir"/std-*.dll; do
+        if [ -f "$file" ]; then
+            printf '%s\n' "$file"
+            return
+        fi
+    done
+    fail "Rust's shared standard library was not found in $dir"
+}
+
+# Copy what was staged for the archive into dist/ itself, replacing what an
+# earlier build left there.
+unpack_stage() {
+    local stage=$1 entry
+    for entry in "$stage"/*; do
+        [ "$(basename "$entry")" = README.md ] && continue
+        rm -rf "dist/$(basename "$entry")"
+        cp -R "$entry" dist/
+    done
+    rm -rf "$stage"
+}
+
 build_windows() {
     need_cargo
     command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 || fail "the MinGW-w64 compiler is missing.
@@ -83,12 +116,18 @@ build_windows() {
     local stage="dist/$name"
     rm -rf "$stage" "dist/$name.zip"
     mkdir -p "$stage"
-    cp "target/$WINDOWS_TARGET/release/$APP.exe" "engine/target/$JAR" README.md "$stage/"
-    cp "target/$WINDOWS_TARGET/release/$APP.exe" "./$APP.exe"
-    cp "engine/target/$JAR" "./$JAR"
+    cp "target/$WINDOWS_TARGET/release/$APP.exe" target/$WINDOWS_TARGET/release/${APP}_*.dll \
+        "$(std_library "$WINDOWS_TARGET")" "engine/target/$JAR" README.md "$stage/"
+    # The shared standard library needs these two from MinGW-w64.
+    local dll path
+    for dll in libgcc_s_seh-1.dll libwinpthread-1.dll; do
+        path=$(x86_64-w64-mingw32-gcc -print-file-name="$dll")
+        [ -f "$path" ] || fail "$dll was not found in the MinGW-w64 installation"
+        cp "$path" "$stage/"
+    done
     (cd dist && make_zip "$name.zip" "$name")
-    rm -rf "$stage"
-    echo "Built dist/$name.zip and copied $APP.exe and $JAR here"
+    unpack_stage "$stage"
+    echo "Built dist/$name.zip; the same files are in dist/"
 }
 
 build_macos() {
@@ -103,7 +142,9 @@ build_macos() {
     bundle="$stage/$APP.app"
     rm -rf "$stage" "dist/$name.zip"
     mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
-    cp "target/release/$APP" "$bundle/Contents/MacOS/$APP"
+    # The libraries sit next to the program, where it looks for them.
+    cp "target/release/$APP" target/release/lib${APP}_*.dylib "$(std_library)" \
+        "$bundle/Contents/MacOS/"
     # The program looks for the engine in Contents/Resources.
     cp "engine/target/$JAR" "$bundle/Contents/Resources/$JAR"
     cp "assets/icon/$APP.icns" "$bundle/Contents/Resources/$APP.icns"
@@ -126,12 +167,10 @@ build_macos() {
 </plist>
 PLIST
     cp README.md "$stage/"
-    rm -rf "./$APP.app"
-    cp -R "$bundle" "./$APP.app"
     # ditto keeps the bundle's permissions and extended attributes intact.
     (cd dist && ditto -c -k --keepParent "$name" "$name.zip")
-    rm -rf "$stage"
-    echo "Built dist/$name.zip and copied $APP.app here"
+    unpack_stage "$stage"
+    echo "Built dist/$name.zip; the app is dist/$APP.app"
     echo "The app is not signed. On first launch, right-click it and choose Open."
 }
 
@@ -145,12 +184,11 @@ build_linux() {
     stage="dist/$name"
     rm -rf "$stage" "dist/$name.tar.gz"
     mkdir -p "$stage"
-    cp "target/release/$APP" "engine/target/$JAR" README.md "$stage/"
-    cp "target/release/$APP" "./$APP"
-    cp "engine/target/$JAR" "./$JAR"
+    cp "target/release/$APP" target/release/lib${APP}_*.so "$(std_library)" \
+        "engine/target/$JAR" README.md "$stage/"
     tar -C dist -czf "dist/$name.tar.gz" "$name"
-    rm -rf "$stage"
-    echo "Built dist/$name.tar.gz and copied $APP and $JAR here"
+    unpack_stage "$stage"
+    echo "Built dist/$name.tar.gz; the same files are in dist/, run dist/$APP"
 }
 
 case "${1:-}" in

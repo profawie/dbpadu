@@ -61,29 +61,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     ui.end_row();
                     for kind in DbKind::ALL {
                         ui.label(kind.label());
-                        if let Some(own) = app.own_driver(kind) {
-                            let file = std::path::Path::new(own.jar.trim())
-                                .file_name()
-                                .map(|name| name.to_string_lossy().to_string())
-                                .unwrap_or_else(|| own.jar.clone());
-                            ui.label(format!("Your own: {file}"))
-                                .on_hover_text(own.jar.trim());
-                            match app.driver_checks.get(&kind) {
-                                Some(Load::Ready(info)) => {
-                                    ui.label(&info.class_name);
-                                    ui.label(&info.version);
-                                }
-                                Some(Load::Failed(error)) => {
-                                    ui.label(RichText::new("Not usable").color(theme.danger))
-                                        .on_hover_text(error);
-                                    ui.label("");
-                                }
-                                _ => {
-                                    ui.label(dim("…"));
-                                    ui.label("");
-                                }
-                            }
-                        } else if let Some(driver) = app.bundled_driver(kind) {
+                        if let Some(driver) = app.bundled_driver(kind) {
                             ui.label(&driver.name);
                             ui.label(&driver.package);
                             ui.label(&driver.version);
@@ -94,9 +72,22 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         }
                         ui.end_row();
                     }
+                    for driver in &app.data.drivers {
+                        ui.label(driver.kind.label());
+                        ui.label(&driver.name);
+                        match app.driver_checks.get(&driver.id) {
+                            Some(Load::Ready(info)) => ui.label(&info.class_name),
+                            Some(Load::Failed(error)) => ui
+                                .label(RichText::new("Not usable").color(theme.danger))
+                                .on_hover_text(error),
+                            _ => ui.label(dim("…")),
+                        };
+                        ui.label(app.driver_version(driver));
+                        ui.end_row();
+                    }
                 });
             ui.label(
-                RichText::new("Choose your own drivers in Settings.")
+                RichText::new("The first six are inside dbpadu. Add your own on the Drivers page.")
                     .small()
                     .color(theme.text_dim),
             );

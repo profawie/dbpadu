@@ -4,13 +4,14 @@
 
 A friendly desktop database client. The app is written in Rust; the query engine is written in Java and talks to databases through JDBC. Runs on Windows, macOS and Linux.
 
-Version: 0.1.1
+Version: 0.2.0
 
 | Connections | A query |
 | --- | --- |
 | ![One card for each connection](docs/connections.png) | ![A formatted query, its result and the status bar](docs/query.png) |
 | ![Rows of a table, opened from the tree](docs/table.png) | ![The connection form](docs/new-connection.png) |
-| ![Settings, with the JDBC drivers](docs/settings.png) | |
+| ![The Drivers page: every driver by name and version](docs/drivers.png) | ![The driver form](docs/driver-form.png) |
+| ![Settings](docs/settings.png) | |
 
 ## Features
 
@@ -18,12 +19,14 @@ Version: 0.1.1
 | --- | --- |
 | One card for each connection, with search; Connect, New query, Edit and Disconnect on the card | Done |
 | Groups and groups inside groups (for example Company1 › Production › prod1), each with a color that shows on its cards, in the tree and under its query tabs | Done |
-| Connection form in one step: pick the database type from the list at the left, fill in host, port, database, user and password; the port, user and driver settings are filled in for the type; **Test connection** before saving | Done |
-| The form names the JDBC driver that will be used: name, package and version | Done |
+| Connection form in one step: pick the driver from the list at the left (name and version), fill in host, port, database, user and password; the port, user and driver settings are filled in for the driver; **Test connection** before saving | Done |
+| The form names the JDBC driver that will be used: name, package or class, and version | Done |
 | SSH tunnel for a database that is only reachable from another computer: sign in with a password or a private key file (see [SSH](#ssh)) | Done |
 | PostgreSQL, MySQL, MariaDB, SQL Server, Oracle and SQLite; every driver is inside the engine, nothing to download | Done |
-| Your own JDBC driver for a database type: choose a newer or another `.jar` file in Settings | Done |
-| Tabs: the pinned Connections tab, then any number of query tabs for each connection; version, Settings and About at the right | Done |
+| Drivers page: add, edit, duplicate and delete JDBC drivers of your own, with name, version, class, URL template, default port, `.jar` files and connection properties (see [JDBC drivers](#jdbc-drivers)) | Done |
+| Several versions of a driver side by side, for example MySQL 5 and MySQL 8; each connection names the one it uses | Done |
+| Any other database that has a JDBC driver, as database type **Other** | Done |
+| Tabs: the pinned Connections tab, then any number of query tabs for each connection; version, Drivers, Settings and About at the right | Done |
 | Tree on the left: groups, connections, schemas, then Tables, Views, Routines and Sequences, with columns (type, key, not null) under a table and a filter; double-click a table or view to see its rows | Done |
 | **A SELECT is always limited** (see [Row limit](#row-limit)) | Done |
 | SQL editor with colors; Run the statement at the cursor or the selected text (Ctrl+Enter or F5); Stop a running query | Done |
@@ -33,7 +36,7 @@ Version: 0.1.1
 | Status bar: result and time, the SQL as it was really sent with what dbpadu added marked, the transaction, the log switch, and the engine at the far right | Done |
 | Transactions: Auto-commit on or off for each connection, Commit and Rollback | Done |
 | Passwords in the operating system's credential store (opt-in), never in a file | Done |
-| Settings: dark, light or system look, max rows of a new tab, the Java to run the engine with, JDBC drivers | Done |
+| Settings: dark, light or system look, max rows of a new tab, the Java to run the engine with | Done |
 | About: versions, the drivers in use, where the files are | Done |
 | App icon: the window, the Windows program and the macOS app | Done |
 | Edit cells in the grid, export results, query history | Planned |
@@ -55,7 +58,23 @@ The first time a server is used, its key is remembered in `known_hosts` next to 
 
 ## JDBC drivers
 
-The engine carries one driver for each database type. Settings and About list their name, package and version. To use another version, download the driver's `.jar` file and choose it under **Settings › JDBC drivers**; **Check** shows the driver class and version found in the file. The driver class is found by itself; fill it in only for a jar that does not name it. Your own driver is used for connections opened from then on, and **Use the one inside dbpadu** goes back.
+The engine carries one driver for each database type. The **Drivers** page (at the right of the tab strip) lists them by name and version, with the drivers you added under them.
+
+A JDBC driver does not have to be the newest one: an old server often needs an old driver, and MySQL 5 is not MySQL 8. So drivers of your own are kept side by side, each with a name and a version, and every connection says which one it uses. The engine loads each driver from its own `.jar` files, apart from the others, so two versions of the same driver never get in each other's way.
+
+**New driver** opens the driver form:
+
+| Field | What it is |
+| --- | --- |
+| Name, Version | What the driver is chosen by, for example `MySQL 5`. The version is read from the `.jar` file when left empty |
+| Database type | Decides how the row limit is written and how the tree is read. **Other** is for any database not in the list: the row limit is then kept by the driver alone (`setMaxRows`), and no `LIMIT` is added to the SQL |
+| Class name | The driver class, for example `com.mysql.jdbc.Driver`. **Find** looks for it in the libraries; when the files hold one driver it is filled in by itself |
+| URL template | The address, with `{host}`, `{port}`, `{database}` and `{user}` where the connection's details go. A part in `[ ]` is left out when it is empty: `jdbc:mysql://{host}[:{port}]/[{database}]` |
+| Default port, database, user | What a new connection with this driver starts with |
+| Libraries | The driver's `.jar` files, or a folder of them |
+| Connection properties | Names and values handed to the driver with every connection, for example `useSSL` = `false` |
+
+**Copy as new** on a driver inside dbpadu starts a driver of your own from it; **Duplicate** copies one of yours, to change into another version. A driver that a connection uses cannot be deleted. In the connection form, the list at the left shows every driver by name and version, and **New driver…** adds one without leaving the form.
 
 ## How the two parts talk
 
@@ -86,7 +105,16 @@ Both build the engine when it is missing or its code changed, then make a debug 
 
 ### Release packages
 
-The build scripts build the engine (its tests run too) and a release of the app, and package both in `dist/`.
+The build scripts build the engine (its tests run too) and a release of the app. Everything that is built ends up in `dist/`, ready to run, and the same files are packed in an archive next to them:
+
+| File | What it is |
+| --- | --- |
+| `dbpadu.exe` (`dbpadu` on Linux) | The program. It only opens the window |
+| `dbpadu_ui.dll`, `dbpadu_engine.dll`, `dbpadu_core.dll` (`libdbpadu_….so` on Linux, `.dylib` on macOS) | The app's own libraries, one for each crate in `crates/` |
+| `std-….dll` (`libstd-….so`), and on Windows `libgcc_s_seh-1.dll` and `libwinpthread-1.dll` | Rust's standard library, which the three libraries share |
+| `dbpadu-engine.jar` | The Java query engine, one file |
+
+The files stay together in one folder. The libraries and the program are built by the same Rust compiler and only fit each other: replace them all together.
 
 **Windows**, with the GNU toolchain, so no Visual Studio or Microsoft build tools are needed:
 
@@ -99,7 +127,7 @@ The build scripts build the engine (its tests run too) and a release of the app,
    powershell -ExecutionPolicy Bypass -File .\build.ps1
    ```
 
-The script writes `dist\dbpadu-<version>-windows-x86_64.zip` and copies `dbpadu.exe` and `dbpadu-engine.jar` to the repository folder.
+The script fills `dist\` and writes `dist\dbpadu-<version>-windows-x86_64.zip`. Run `dist\dbpadu.exe`.
 
 **macOS and Linux:**
 
@@ -108,7 +136,7 @@ The script writes `dist\dbpadu-<version>-windows-x86_64.zip` and copies `dbpadu.
 ./build.sh --windows   # Windows .zip, cross-built with MinGW-w64
 ```
 
-A release is two files that stay together: the program and `dbpadu-engine.jar`. On macOS the engine is inside `dbpadu.app`. The macOS app is not signed; on first launch, right-click it and choose Open.
+On macOS everything is inside `dist/dbpadu.app`. The macOS app is not signed; on first launch, right-click it and choose Open.
 
 ### Where the app looks for the engine and Java
 
@@ -122,16 +150,19 @@ cargo test                    # the app and its crates
 cd engine && ./mvnw test      # the engine
 ```
 
-`cargo test` also starts the real engine against a SQLite file when the engine is built, and checks that the app and the engine have the same version.
+`cargo test` also starts the real engine against a SQLite file when the engine is built, connects through a driver loaded from a `.jar` file of its own, and checks that the app and the engine have the same version.
 
 ## Code layout
 
 | Part | What it does |
 | --- | --- |
-| `dbpadu` (`src/`) | The desktop app: cards and groups, tabs, tree, query tabs, log, status bar, Settings, About, themes. Built with [egui/eframe](https://github.com/emilk/egui) |
-| `dbpadu-core` (`crates/core`) | Saved connections, groups and settings, saved passwords, SQL formatting, finding the statement at the cursor |
+| `dbpadu` (`src/`) | The program: a few lines that open the window |
+| `dbpadu-ui` (`crates/ui`) | The window: cards and groups, tabs, tree, query tabs, log, status bar, Drivers, Settings, About, themes. Built with [egui/eframe](https://github.com/emilk/egui) |
 | `dbpadu-engine` (`crates/engine`) | Starts the Java engine and talks to it |
+| `dbpadu-core` (`crates/core`) | Saved connections, groups, drivers and settings, saved passwords, URL templates, SQL formatting, finding the statement at the cursor |
 | The engine (`engine/`) | Java: connections, SSH tunnels, drivers, running SQL, the row limit, transactions, reading schemas, tables, routines and sequences |
+
+Each crate in `crates/` is built as a shared library (`crate-type = ["dylib"]`), not linked into one program; only the Java engine is one file. They form a chain, `dbpadu` → `dbpadu-ui` → `dbpadu-engine` → `dbpadu-core`, so each third-party library is inside exactly one of them. `.cargo/config.toml` makes Rust's standard library a shared library too and tells the program to look for its libraries in its own folder.
 
 Third-party Rust libraries are declared once, under `[workspace.dependencies]` in the root `Cargo.toml`; the engine's are in `engine/pom.xml`. The version is in both files and must be the same.
 

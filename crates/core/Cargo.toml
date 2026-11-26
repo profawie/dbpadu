@@ -7,6 +7,10 @@ edition.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+# A shared library (dbpadu_core.dll, libdbpadu_core.so) next to the program.
+[lib]
+crate-type = ["dylib"]
+
 [dependencies]
 directories.workspace = true
 keyring.workspace = true

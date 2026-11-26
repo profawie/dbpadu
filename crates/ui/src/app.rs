@@ -11,7 +11,7 @@ use eframe::egui::{self, RichText};
 use uuid::Uuid;
 
 use dbpadu_core::{
-    model::{Appearance, Connection, Data, DbKind, OwnDriver, SshAuth},
+    model::{self, Appearance, Connection, Data, DbKind, SshAuth},
     secrets::{Secret, Secrets},
     sql,
     store::Store,
@@ -27,7 +27,7 @@ use dbpadu_engine::{
 
 use crate::{
     theme::Theme,
-    ui::{self, editor::ConnectionEditor, home::GroupDialog},
+    ui::{self, drivers::DriverEditor, editor::ConnectionEditor, home::GroupDialog},
 };
 
 /// Lines kept in each log; the oldest go first.
@@ -166,6 +166,8 @@ pub struct QueryTab {
 pub enum View {
     /// The connection cards.
     Home,
+    /// The JDBC drivers.
+    Drivers,
     Settings,
     About,
     Tab(u64),
@@ -185,8 +187,11 @@ enum Pending {
     Columns(Uuid, String, String),
     Routines(Uuid, String),
     Sequences(Uuid, String),
-    /// A look into the user's own driver for a kind of database.
-    DriverInfo(DbKind),
+    /// A look into the files of one of the user's own drivers.
+    DriverInfo(Uuid),
+    /// A look into the files of the driver in the driver form. The number
+    /// tells the answers of earlier looks apart.
+    DriverProbe(u64),
     /// Nothing to do with the answer.
     Ignore,
 }
@@ -242,7 +247,15 @@ pub struct App {
     pub engine_log: Vec<EngineLog>,
     pub log_tab: LogTab,
     /// What the engine found in each of the user's own drivers.
-    pub driver_checks: HashMap<DbKind, Load<OwnDriverInfo>>,
+    pub driver_checks: HashMap<Uuid, Load<OwnDriverInfo>>,
+    /// The driver form, while it is open.
+    pub driver_editor: Option<DriverEditor>,
+    /// Text typed in the search box of the Drivers page.
+    pub driver_search: String,
+    /// The kind of database the Drivers page is narrowed to.
+    pub driver_kind: Option<DbKind>,
+    /// Counts the looks into the driver form's files.
+    probes: u64,
     /// The box that names a new group or renames one, while it is open.
     pub group_dialog: Option<GroupDialog>,
 }
@@ -268,6 +281,19 @@ fn ui_theme(appearance: Appearance, ctx: &egui::Context) -> Theme {
         Appearance::System => ctx.system_theme() != Some(egui::Theme::Light),
     };
     Theme::ui(dark)
+}
+
+/// What a look into a driver's files gave. Files without a usable driver
+/// class are a failure, with the reason.
+fn driver_check(result: Result<dbpadu_engine::Value, String>) -> Load<OwnDriverInfo> {
+    match result.and_then(protocol::read::<OwnDriverInfo>) {
+        Ok(info) if info.class_name.is_empty() && info.classes.is_empty() => Load::Failed(
+            info.error
+                .unwrap_or_else(|| "No JDBC driver was found in the files.".to_string()),
+        ),
+        Ok(info) => Load::Ready(info),
+        Err(err) => Load::Failed(err),
+    }
 }
 
 pub fn connection_key(connection: Uuid) -> String {
@@ -335,6 +361,10 @@ impl App {
             engine_log: Vec::new(),
             log_tab: LogTab::Sql,
             driver_checks: HashMap::new(),
+            driver_editor: None,
+            driver_search: String::new(),
+            driver_kind: None,
+            probes: 0,
             group_dialog: None,
         };
         app.start_engine();
@@ -423,24 +453,65 @@ impl App {
         }
     }
 
-    /// The user's own driver for a kind of database, if one is set.
-    pub fn own_driver(&self, kind: DbKind) -> Option<&OwnDriver> {
-        self.data
-            .settings
-            .drivers
-            .get(&kind)
-            .filter(|driver| !driver.jar.trim().is_empty())
-    }
-
-    /// Ask the engine to look into the user's own driver for `kind`.
-    pub fn check_driver(&mut self, kind: DbKind) {
-        let Some(driver) = self.own_driver(kind).cloned() else {
-            self.driver_checks.remove(&kind);
+    /// Ask the engine to look into the files of one of the user's own
+    /// drivers: is there a driver in them, and which version.
+    pub fn check_driver(&mut self, id: Uuid) {
+        let Some(driver) = self.data.driver(id) else {
+            self.driver_checks.remove(&id);
             return;
         };
-        let request = protocol::driver_info(driver.jar.trim(), driver.class_name.trim());
-        if self.request(request, Pending::DriverInfo(kind)) {
-            self.driver_checks.insert(kind, Load::Loading);
+        let request = protocol::driver_info(&driver.library_paths(), driver.class_name.trim());
+        if self.request(request, Pending::DriverInfo(id)) {
+            self.driver_checks.insert(id, Load::Loading);
+        }
+    }
+
+    /// Ask the engine to look into the files of the driver in the driver
+    /// form. Returns the number the answer will carry, or `None` when the
+    /// engine is not running.
+    pub fn probe_driver(&mut self, driver: &model::Driver) -> Option<u64> {
+        self.probes += 1;
+        let request = protocol::driver_info(&driver.library_paths(), driver.class_name.trim());
+        self.request(request, Pending::DriverProbe(self.probes))
+            .then_some(self.probes)
+    }
+
+    /// The version of one of the user's own drivers: the one typed for it,
+    /// else the one the engine read from its files.
+    pub fn driver_version(&self, driver: &model::Driver) -> String {
+        let typed = driver.version.trim();
+        if !typed.is_empty() {
+            return typed.to_string();
+        }
+        match self.driver_checks.get(&driver.id) {
+            Some(Load::Ready(info)) => info.version.clone(),
+            _ => String::new(),
+        }
+    }
+
+    /// Keep a driver from the driver form. Connections opened from now on
+    /// use it as it is now.
+    pub fn save_driver(&mut self, driver: model::Driver) {
+        let id = driver.id;
+        self.data.upsert_driver(driver);
+        self.save();
+        self.check_driver(id);
+        // A connection form that is open moves to the new driver's kind.
+        if let Some(editor) = &mut self.editor
+            && editor.draft.driver == Some(id)
+            && let Some(driver) = self.data.driver(id)
+        {
+            editor.draft.kind = driver.kind;
+        }
+    }
+
+    pub fn delete_driver(&mut self, id: Uuid) {
+        match self.data.remove_driver(id) {
+            Ok(()) => {
+                self.driver_checks.remove(&id);
+                self.save();
+            }
+            Err(why) => self.notify(why.to_string()),
         }
     }
 
@@ -559,8 +630,9 @@ impl App {
                         hello.version, hello.java
                     ));
                     self.engine_state = EngineState::Ready(hello);
-                    for kind in DbKind::ALL {
-                        self.check_driver(kind);
+                    let ids: Vec<Uuid> = self.data.drivers.iter().map(|d| d.id).collect();
+                    for id in ids {
+                        self.check_driver(id);
                     }
                 }
                 Err(err) => self.engine_state = EngineState::Failed(err),
@@ -732,16 +804,15 @@ impl App {
                     Err(err) => Load::Failed(err),
                 };
             }
-            Pending::DriverInfo(kind) => {
-                // Only if the setting is still there to be told about.
-                if self.own_driver(kind).is_some() {
-                    self.driver_checks.insert(
-                        kind,
-                        match result.and_then(protocol::read::<OwnDriverInfo>) {
-                            Ok(info) => Load::Ready(info),
-                            Err(err) => Load::Failed(err),
-                        },
-                    );
+            Pending::DriverInfo(id) => {
+                // Only if the driver is still there to be told about.
+                if self.data.driver(id).is_some() {
+                    self.driver_checks.insert(id, driver_check(result));
+                }
+            }
+            Pending::DriverProbe(probe) => {
+                if let Some(editor) = &mut self.driver_editor {
+                    editor.probed(probe, driver_check(result));
                 }
             }
         }
@@ -772,20 +843,29 @@ impl App {
         ssh_secret: &str,
         session: Option<Uuid>,
     ) -> bool {
+        let driver = self.data.driver_of(connection).cloned();
+        if let Some(problem) = connection.problem(driver.as_ref()) {
+            self.notify(format!("{}: {problem}", connection.display_name()));
+            return false;
+        }
         let tunnel = connection.uses_ssh();
         let url = if tunnel {
-            connection.jdbc_url_through_tunnel()
+            connection.jdbc_url_through_tunnel(driver.as_ref())
         } else {
-            connection.jdbc_url()
+            connection.jdbc_url(driver.as_ref())
         };
         let known_hosts = self
             .known_hosts()
             .map(|path| path.display().to_string())
             .unwrap_or_default();
-        let driver = self
-            .own_driver(connection.kind)
-            .cloned()
-            .unwrap_or_default();
+        let (jars, class, properties) = match &driver {
+            Some(driver) => (
+                driver.library_paths(),
+                driver.class_name.trim(),
+                driver.set_properties(),
+            ),
+            None => (Vec::new(), "", Vec::new()),
+        };
         let ssh = tunnel.then(|| SshTarget {
             host: connection.ssh.host.trim(),
             port: connection.ssh.port,
@@ -805,8 +885,9 @@ impl App {
             user: connection.username.trim(),
             password,
             ssh,
-            driver_jar: driver.jar.trim(),
-            driver_class: driver.class_name.trim(),
+            driver_jars: &jars,
+            driver_class: class,
+            properties: &properties,
         };
         match session {
             Some(id) => self.request(
@@ -1298,6 +1379,11 @@ impl eframe::App for App {
                     .frame(egui::Frame::new().fill(theme.bg))
                     .show(ui, |ui| ui::query::show(self, ui, id));
             }
+            View::Drivers => {
+                egui::CentralPanel::default()
+                    .frame(page)
+                    .show(ui, |ui| ui::drivers::show(self, ui));
+            }
             View::Settings => {
                 egui::CentralPanel::default()
                     .frame(page)
@@ -1317,6 +1403,8 @@ impl eframe::App for App {
         }
 
         ui::editor::show(self, ui.ctx());
+        // After the connection form: a driver can be added from there.
+        ui::drivers::editor(self, ui.ctx());
         ui::editor::password_prompt(self, ui.ctx());
         ui::home::group_dialog(self, ui.ctx());
     }

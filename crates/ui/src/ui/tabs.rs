@@ -1,5 +1,5 @@
 //! The tab strip: the pinned Connections tab, then one tab per query. At
-//! the far right: the version, Settings and About.
+//! the far right: the version, Drivers, Settings and About.
 
 use eframe::egui::{self, RichText};
 
@@ -25,6 +25,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let settings = app.view == View::Settings;
             if tab_button(ui, app, "Settings", None, settings).clicked() {
                 app.view = View::Settings;
+            }
+            ui.separator();
+            let drivers = app.view == View::Drivers;
+            if tab_button(ui, app, "Drivers", None, drivers).clicked() {
+                app.view = View::Drivers;
             }
             ui.separator();
             ui.label(

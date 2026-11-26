@@ -14,6 +14,8 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
@@ -159,7 +161,7 @@ public final class Main {
                 return result;
             }
             case "driverInfo" -> {
-                return Drivers.describe(text(request, "driverJar"), text(request, "driverClass"));
+                return Drivers.describe(libraries(request), text(request, "driverClass"));
             }
             case "test" -> {
                 Session session = open("test", request);
@@ -188,6 +190,15 @@ public final class Main {
     /** Open the SSH tunnel, if one is asked for, then the connection. */
     private static Session open(String id, JsonObject request) throws SQLException {
         Properties properties = new Properties();
+        // The settings of the user's own driver; user and password win.
+        if (request.has("properties") && request.get("properties").isJsonObject()) {
+            for (Map.Entry<String, JsonElement> property
+                    : request.getAsJsonObject("properties").entrySet()) {
+                if (property.getValue().isJsonPrimitive()) {
+                    properties.setProperty(property.getKey(), property.getValue().getAsString());
+                }
+            }
+        }
         String user = text(request, "user");
         String password = text(request, "password");
         if (user != null && !user.isEmpty()) {
@@ -204,7 +215,7 @@ public final class Main {
         }
         try {
             Connection connection = Drivers.connect(
-                url, properties, text(request, "driverJar"), text(request, "driverClass"));
+                url, properties, libraries(request), text(request, "driverClass"));
             return new Session(id, text(request, "kind"), connection, tunnel);
         } catch (SQLException | RuntimeException problem) {
             if (tunnel != null) {
@@ -243,6 +254,19 @@ public final class Main {
             throw new SQLException("Not connected.");
         }
         return session;
+    }
+
+    /** The jar files of the user's own driver; empty for a driver inside the engine. */
+    private static List<String> libraries(JsonObject request) {
+        List<String> libraries = new ArrayList<>();
+        if (request.has("driverJars") && request.get("driverJars").isJsonArray()) {
+            for (JsonElement jar : request.getAsJsonArray("driverJars")) {
+                if (jar.isJsonPrimitive() && !jar.getAsString().isBlank()) {
+                    libraries.add(jar.getAsString());
+                }
+            }
+        }
+        return libraries;
     }
 
     private static String text(JsonObject request, String name) {

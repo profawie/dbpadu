@@ -1,0 +1,21 @@
+[package]
+name = "dbpadu-ui"
+description = "dbpadu's window: pages, dialogs and themes"
+publish = false
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# A shared library (dbpadu_ui.dll, libdbpadu_ui.so) next to the program.
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+chrono.workspace = true
+dbpadu-core.workspace = true
+dbpadu-engine.workspace = true
+eframe.workspace = true
+egui_extras.workspace = true
+rfd.workspace = true
+uuid.workspace = true
