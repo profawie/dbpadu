@@ -205,6 +205,34 @@ pub enum SshAuth {
     Key,
 }
 
+/// A jump server: an SSH server to go through first to reach the next
+/// one (what OpenSSH calls ProxyJump). The password or passphrase is never
+/// part of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Jump {
+    /// Names its password in the credential store.
+    pub id: Uuid,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth: SshAuth,
+    pub key_file: String,
+}
+
+impl Default for Jump {
+    fn default() -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            host: String::new(),
+            port: 22,
+            username: String::new(),
+            auth: SshAuth::default(),
+            key_file: String::new(),
+        }
+    }
+}
+
 /// An SSH tunnel: the engine signs in to `host` and reaches the database
 /// from there. The password or passphrase is never part of it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -216,6 +244,10 @@ pub struct Ssh {
     pub username: String,
     pub auth: SshAuth,
     pub key_file: String,
+    /// Servers to go through to reach `host`, in the order they are
+    /// passed: the first is reached from this computer. Empty when `host`
+    /// is reached directly.
+    pub jumps: Vec<Jump>,
 }
 
 impl Default for Ssh {
@@ -227,6 +259,7 @@ impl Default for Ssh {
             username: String::new(),
             auth: SshAuth::default(),
             key_file: String::new(),
+            jumps: Vec::new(),
         }
     }
 }
@@ -395,6 +428,20 @@ impl Connection {
             }
             if self.ssh.auth == SshAuth::Key && self.ssh.key_file.trim().is_empty() {
                 return Some("Choose the SSH private key file.");
+            }
+            for jump in &self.ssh.jumps {
+                if jump.host.trim().is_empty() {
+                    return Some("Enter the host of the jump server.");
+                }
+                if jump.port == 0 {
+                    return Some("Enter the port of the jump server.");
+                }
+                if jump.username.trim().is_empty() {
+                    return Some("Enter the user name of the jump server.");
+                }
+                if jump.auth == SshAuth::Key && jump.key_file.trim().is_empty() {
+                    return Some("Choose the private key file of the jump server.");
+                }
             }
         }
         None
@@ -1168,6 +1215,33 @@ mod tests {
         assert_eq!(c.problem(None), None);
         c.ssh.auth = SshAuth::Key;
         assert!(c.problem(None).is_some());
+    }
+
+    #[test]
+    fn a_jump_server_needs_its_details() {
+        let mut c = connection(DbKind::Postgres);
+        c.ssh.enabled = true;
+        c.ssh.host = "db-gateway".into();
+        c.ssh.username = "me".into();
+        c.ssh.jumps.push(Jump::default());
+        assert_eq!(c.problem(None), Some("Enter the host of the jump server."));
+        c.ssh.jumps[0].host = "bastion".into();
+        assert_eq!(
+            c.problem(None),
+            Some("Enter the user name of the jump server.")
+        );
+        c.ssh.jumps[0].username = "me".into();
+        assert_eq!(c.problem(None), None);
+    }
+
+    #[test]
+    fn a_connection_saved_before_jump_servers_still_opens() {
+        let ssh: Ssh = serde_json::from_str(
+            r#"{"enabled":true,"host":"bastion","port":22,"username":"me","auth":"password","key_file":""}"#,
+        )
+        .unwrap();
+        assert!(ssh.jumps.is_empty());
+        assert_eq!(ssh.host, "bastion");
     }
 
     #[test]

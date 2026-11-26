@@ -6,7 +6,7 @@ resolver = "3"
 
 [workspace.package]
 # Keep the same as the version in engine/pom.xml.
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 repository = "https://github.com/profawie/dbpadu"
 rust-version = "1.92"

@@ -1,9 +1,12 @@
 //! The connection form, and the box that asks for a password.
 
+use std::collections::HashMap;
+
 use eframe::egui::{self, RichText};
+use uuid::Uuid;
 
 use dbpadu_core::{
-    model::{Connection, DbKind, Driver, SshAuth, group_label},
+    model::{Connection, DbKind, Driver, Jump, SshAuth, group_label},
     secrets::{Secret, Secrets},
 };
 
@@ -32,8 +35,12 @@ pub struct ConnectionEditor {
     pub password: String,
     /// The SSH password, or the passphrase of the SSH key.
     pub ssh_secret: String,
+    /// The same for each jump server, by its id.
+    pub jump_secrets: HashMap<Uuid, String>,
     port: String,
     ssh_port: String,
+    /// The port of each jump server as typed, by its id.
+    jump_ports: HashMap<Uuid, String>,
     is_new: bool,
     page: Page,
     /// The result of "Test connection": what answered, or why it failed.
@@ -49,12 +56,18 @@ impl ConnectionEditor {
             group: group.to_string(),
             ..Connection::new(DbKind::default())
         };
-        Self::with(draft, String::new(), String::new(), true)
+        Self::with(draft, String::new(), String::new(), HashMap::new(), true)
     }
 
     /// `known` is what was typed for it earlier in this run of the app:
-    /// the database password and the SSH password.
-    pub fn edit(connection: &Connection, secrets: &Secrets, known: (String, String)) -> Self {
+    /// the database password and the SSH password; `jump_secrets` is the
+    /// same for its jump servers.
+    pub fn edit(
+        connection: &Connection,
+        secrets: &Secrets,
+        known: (String, String),
+        mut jump_secrets: HashMap<Uuid, String>,
+    ) -> Self {
         let (mut password, mut ssh_secret) = known;
         if connection.save_password {
             if password.is_empty() {
@@ -65,17 +78,38 @@ impl ConnectionEditor {
             if ssh_secret.is_empty() {
                 ssh_secret = secrets.get(connection.id, Secret::Ssh).unwrap_or_default();
             }
+            for jump in &connection.ssh.jumps {
+                if !jump_secrets.contains_key(&jump.id)
+                    && let Some(secret) = secrets.get(connection.id, Secret::Jump(jump.id))
+                {
+                    jump_secrets.insert(jump.id, secret);
+                }
+            }
         }
-        Self::with(connection.clone(), password, ssh_secret, false)
+        Self::with(
+            connection.clone(),
+            password,
+            ssh_secret,
+            jump_secrets,
+            false,
+        )
     }
 
-    fn with(draft: Connection, password: String, ssh_secret: String, is_new: bool) -> Self {
+    fn with(
+        draft: Connection,
+        password: String,
+        ssh_secret: String,
+        jump_secrets: HashMap<Uuid, String>,
+        is_new: bool,
+    ) -> Self {
         Self {
             port: draft.port.to_string(),
             ssh_port: draft.ssh.port.to_string(),
+            jump_ports: HashMap::new(),
             draft,
             password,
             ssh_secret,
+            jump_secrets,
             is_new,
             page: Page::Main,
             test: None,
@@ -256,7 +290,7 @@ fn remember(ui: &mut egui::Ui, draft: &mut Connection, can_save: bool) {
             "Remember the passwords on this computer",
         )
         .on_hover_text(
-            "The database password and the SSH password are kept in the system's credential \
+            "The database password and the SSH passwords are kept in the system's credential \
              store (Windows Credential Manager or the macOS Keychain), never in a file of dbpadu.",
         )
         .on_disabled_hover_text("This system has no credential store.");
@@ -367,6 +401,65 @@ fn main_page(
     remember(ui, draft, can_save);
 }
 
+/// The fields to sign in at an SSH server: `secret` is the password, or
+/// the passphrase of the key.
+fn sign_in_fields(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    auth: &mut SshAuth,
+    key_file: &mut String,
+    secret: &mut String,
+) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Sign in with").small().color(theme.text_dim));
+        ui.radio_value(auth, SshAuth::Password, "Password");
+        ui.radio_value(auth, SshAuth::Key, "Private key file");
+    });
+    match auth {
+        SshAuth::Password => {
+            super::field_label(ui, theme, "SSH password");
+        }
+        SshAuth::Key => {
+            super::field_label(ui, theme, "Private key file");
+            ui.horizontal(|ui| {
+                let browse = ui.button("Browse…");
+                ui.add(
+                    egui::TextEdit::singleline(key_file)
+                        .hint_text("For example: ~/.ssh/id_ed25519")
+                        .desired_width(f32::INFINITY),
+                );
+                if browse.clicked()
+                    && let Some(path) = rfd::FileDialog::new().pick_file()
+                {
+                    *key_file = path.display().to_string();
+                }
+            });
+            super::field_label(ui, theme, "Passphrase of the key (empty if it has none)");
+        }
+    }
+    ui.add(
+        egui::TextEdit::singleline(secret)
+            .password(true)
+            .desired_width(f32::INFINITY),
+    );
+}
+
+/// The name of an SSH server in the route, or `fallback` while it has none.
+fn hop_name(host: &str, port: u16, fallback: &str) -> String {
+    match host.trim() {
+        "" => fallback.to_string(),
+        host if port == 22 => host.to_string(),
+        host => format!("{host}:{port}"),
+    }
+}
+
+/// What to do with a jump server in the list.
+enum JumpAction {
+    Remove(usize),
+    /// Swap with the one before it.
+    Earlier(usize),
+}
+
 fn ssh_page(ui: &mut egui::Ui, theme: &Theme, editor: &mut ConnectionEditor, can_save: bool) {
     let draft = &mut editor.draft;
     ui.checkbox(&mut draft.ssh.enabled, "Connect through an SSH server")
@@ -384,15 +477,28 @@ fn ssh_page(ui: &mut egui::Ui, theme: &Theme, editor: &mut ConnectionEditor, can
         );
         return;
     }
+    // With jump servers the page is longer than the form.
+    egui::ScrollArea::vertical()
+        .max_height(FORM_HEIGHT - 110.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            // Room for the scroll bar.
+            ui.set_width(ui.available_width() - 12.0);
+            ssh_fields(ui, theme, editor, can_save);
+        });
+}
+
+fn ssh_fields(ui: &mut egui::Ui, theme: &Theme, editor: &mut ConnectionEditor, can_save: bool) {
+    let draft = &mut editor.draft;
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
-            ui.set_width(410.0);
+            ui.set_width(390.0);
             super::field(
                 ui,
                 theme,
                 "SSH host",
                 &mut draft.ssh.host,
-                "For example: bastion.example.com",
+                "For example: db-gateway.example.com",
             );
         });
         ui.vertical(|ui| {
@@ -401,47 +507,126 @@ fn ssh_page(ui: &mut egui::Ui, theme: &Theme, editor: &mut ConnectionEditor, can
         });
     });
     super::field(ui, theme, "SSH user name", &mut draft.ssh.username, "");
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Sign in with").small().color(theme.text_dim));
-        ui.radio_value(&mut draft.ssh.auth, SshAuth::Password, "Password");
-        ui.radio_value(&mut draft.ssh.auth, SshAuth::Key, "Private key file");
-    });
-    match draft.ssh.auth {
-        SshAuth::Password => {
-            super::field_label(ui, theme, "SSH password");
-        }
-        SshAuth::Key => {
-            super::field_label(ui, theme, "Private key file");
-            ui.horizontal(|ui| {
-                let browse = ui.button("Browse…");
-                ui.add(
-                    egui::TextEdit::singleline(&mut draft.ssh.key_file)
-                        .hint_text("For example: ~/.ssh/id_ed25519")
-                        .desired_width(f32::INFINITY),
-                );
-                if browse.clicked()
-                    && let Some(path) = rfd::FileDialog::new().pick_file()
-                {
-                    draft.ssh.key_file = path.display().to_string();
-                }
-            });
-            super::field_label(ui, theme, "Passphrase of the key (empty if it has none)");
-        }
-    }
-    ui.add(
-        egui::TextEdit::singleline(&mut editor.ssh_secret)
-            .password(true)
-            .desired_width(f32::INFINITY),
+    sign_in_fields(
+        ui,
+        theme,
+        &mut draft.ssh.auth,
+        &mut draft.ssh.key_file,
+        &mut editor.ssh_secret,
     );
     remember(ui, draft, can_save);
+
+    ui.add_space(6.0);
+    ui.separator();
+    ui.label(RichText::new("Jump servers").strong());
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "For an SSH server that this computer cannot reach directly. dbpadu signs in to \
+                 each jump server in turn and reaches the next one from there, like ProxyJump \
+                 in OpenSSH.",
+            )
+            .small()
+            .color(theme.text_dim),
+        )
+        .wrap(),
+    );
+    let count = draft.ssh.jumps.len();
+    let mut action = None;
+    for (index, jump) in draft.ssh.jumps.iter_mut().enumerate() {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("Jump server {}", index + 1)).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Remove").clicked() {
+                        action = Some(JumpAction::Remove(index));
+                    }
+                    if count > 1 {
+                        if ui
+                            .add_enabled(index + 1 < count, egui::Button::new("↓").small())
+                            .on_hover_text("Pass through this one later")
+                            .clicked()
+                        {
+                            action = Some(JumpAction::Earlier(index + 1));
+                        }
+                        if ui
+                            .add_enabled(index > 0, egui::Button::new("↑").small())
+                            .on_hover_text("Pass through this one earlier")
+                            .clicked()
+                        {
+                            action = Some(JumpAction::Earlier(index));
+                        }
+                    }
+                });
+            });
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(370.0);
+                    super::field(
+                        ui,
+                        theme,
+                        "Host",
+                        &mut jump.host,
+                        "For example: bastion.example.com",
+                    );
+                });
+                ui.vertical(|ui| {
+                    super::field_label(ui, theme, "Port");
+                    let text = editor
+                        .jump_ports
+                        .entry(jump.id)
+                        .or_insert_with(|| jump.port.to_string());
+                    port_field(ui, text, &mut jump.port);
+                });
+            });
+            super::field(ui, theme, "User name", &mut jump.username, "");
+            ui.push_id(jump.id, |ui| {
+                sign_in_fields(
+                    ui,
+                    theme,
+                    &mut jump.auth,
+                    &mut jump.key_file,
+                    editor.jump_secrets.entry(jump.id).or_default(),
+                );
+            });
+        });
+    }
+    match action {
+        Some(JumpAction::Remove(index)) => {
+            let jump = draft.ssh.jumps.remove(index);
+            editor.jump_secrets.remove(&jump.id);
+            editor.jump_ports.remove(&jump.id);
+        }
+        Some(JumpAction::Earlier(index)) => draft.ssh.jumps.swap(index - 1, index),
+        None => {}
+    }
+    if ui
+        .button("Add a jump server")
+        .on_hover_text(
+            "The first jump server is the one this computer reaches; the last one reaches the \
+             SSH server above.",
+        )
+        .clicked()
+    {
+        draft.ssh.jumps.push(Jump::default());
+    }
+
+    // The way to the database, one server after the other.
+    let mut route = vec!["this computer".to_string()];
+    for (index, jump) in draft.ssh.jumps.iter().enumerate() {
+        let fallback = format!("jump server {}", index + 1);
+        route.push(hop_name(&jump.host, jump.port, &fallback));
+    }
+    route.push(hop_name(&draft.ssh.host, draft.ssh.port, "SSH server"));
+    route.push(format!("{}:{}", draft.host.trim(), draft.port));
+    ui.add_space(4.0);
     ui.add(
         egui::Label::new(
             RichText::new(format!(
-                "The database is then reached from the SSH server as {}:{}, the host and port \
-                 on the Main page. The server's key is remembered the first time; if it ever \
+                "Route: {}. The database's host and port on the Main page are as the last SSH \
+                 server sees them. Each server's key is remembered the first time; if it ever \
                  changes, dbpadu refuses to connect.",
-                draft.host.trim(),
-                draft.port
+                route.join(" → ")
             ))
             .small()
             .color(theme.text_dim),
@@ -668,8 +853,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         Outcome::Test => {
             let draft = editor.draft.clone();
             let (password, ssh_secret) = (editor.password.clone(), editor.ssh_secret.clone());
+            let jump_secrets = editor.jump_secrets.clone();
             app.editor = Some(editor);
-            app.test_connection(&draft, &password, &ssh_secret);
+            app.test_connection(&draft, &password, &ssh_secret, &jump_secrets);
         }
         Outcome::Delete => app.delete_connection(editor.draft.id),
         Outcome::Save => {
@@ -677,13 +863,41 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 mut draft,
                 password,
                 mut ssh_secret,
+                mut jump_secrets,
                 ..
             } = editor;
             let id = draft.id;
             if !draft.uses_ssh() {
                 ssh_secret.clear();
+                jump_secrets.clear();
             }
-            let secrets = [(Secret::Password, &password), (Secret::Ssh, &ssh_secret)];
+            // Jump servers that were taken out are forgotten.
+            let before: Vec<Uuid> = app
+                .data
+                .connection(id)
+                .map(|old| old.ssh.jumps.iter().map(|jump| jump.id).collect())
+                .unwrap_or_default();
+            for jump in before {
+                if !draft.ssh.jumps.iter().any(|kept| kept.id == jump) {
+                    app.secrets.delete(id, Secret::Jump(jump));
+                    app.keep_jump_secrets([(jump, String::new())]);
+                }
+            }
+            let jumps: Vec<(Uuid, String)> = draft
+                .ssh
+                .jumps
+                .iter()
+                .map(|jump| {
+                    let secret = jump_secrets.remove(&jump.id).unwrap_or_default();
+                    (jump.id, secret)
+                })
+                .collect();
+            let mut secrets = vec![(Secret::Password, &password), (Secret::Ssh, &ssh_secret)];
+            secrets.extend(
+                jumps
+                    .iter()
+                    .map(|(jump, secret)| (Secret::Jump(*jump), secret)),
+            );
             if draft.save_password && secrets.iter().any(|(_, value)| !value.is_empty()) {
                 for (secret, value) in secrets {
                     if value.is_empty() {
@@ -696,9 +910,11 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 }
             } else {
                 draft.save_password = false;
-                app.secrets.delete(id, Secret::Password);
-                app.secrets.delete(id, Secret::Ssh);
+                for (secret, _) in secrets {
+                    app.secrets.delete(id, secret);
+                }
             }
+            app.keep_jump_secrets(jumps);
             app.keep_secrets(id, password, ssh_secret);
             app.data.upsert(draft);
             app.save();
@@ -717,7 +933,10 @@ pub fn password_prompt(app: &mut App, ctx: &egui::Context) {
     let theme = app.theme;
     let can_save = app.secrets.available();
     let (mut connect, mut cancel) = (false, false);
-    let both = prompt.password.is_some() && prompt.ssh.is_some();
+    let asked = usize::from(prompt.password.is_some())
+        + usize::from(prompt.ssh.is_some())
+        + prompt.jumps.len();
+    let both = asked > 1;
     let modal = egui::Modal::new(egui::Id::unique("password_prompt"))
         .frame(dialog_frame(ctx))
         .show(ctx, |ui| {
@@ -746,6 +965,16 @@ pub fn password_prompt(app: &mut App, ctx: &egui::Context) {
                 }
                 first = false;
             };
+            for (id, secret) in &mut prompt.jumps {
+                if let Some(jump) = connection.ssh.jumps.iter().find(|jump| jump.id == *id) {
+                    let label = format!(
+                        "SSH password of {} on jump server {}",
+                        jump.username.trim(),
+                        jump.host.trim()
+                    );
+                    ask(ui, label, secret);
+                }
+            }
             if let Some(ssh) = &mut prompt.ssh {
                 let label = format!(
                     "SSH password of {} on {}",
@@ -777,6 +1006,7 @@ pub fn password_prompt(app: &mut App, ctx: &egui::Context) {
             connection: id,
             password,
             ssh,
+            jumps,
             remember,
         } = prompt;
         if remember {
@@ -786,6 +1016,11 @@ pub fn password_prompt(app: &mut App, ctx: &egui::Context) {
                 .try_for_each(|(secret, value)| match value {
                     Some(value) => app.secrets.set(id, secret, value),
                     None => Ok(()),
+                })
+                .and_then(|()| {
+                    jumps.iter().try_for_each(|(jump, value)| {
+                        app.secrets.set(id, Secret::Jump(*jump), value)
+                    })
                 });
             match saved {
                 Ok(()) => {
@@ -798,6 +1033,7 @@ pub fn password_prompt(app: &mut App, ctx: &egui::Context) {
             }
         }
         // What was not asked for is known from before.
+        app.keep_jump_secrets(jumps);
         let known = app.known_secrets(id);
         app.connect_with(id, password.unwrap_or(known.0), ssh.unwrap_or(known.1));
     } else if !(cancel || modal.should_close()) {

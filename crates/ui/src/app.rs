@@ -19,9 +19,9 @@ use dbpadu_core::{
 use dbpadu_engine::{
     Engine, Event, locate,
     protocol::{
-        self, Connected, Driver, Hello, OwnDriverInfo, QueryResult, Request, Routine, Routines,
-        Schemas, Sequences, SshTarget, Table, TableColumn, TableColumns, Tables, Target, TxAnswer,
-        TxState,
+        self, Connected, Driver, Hello, JumpTarget, OwnDriverInfo, QueryResult, Request, Routine,
+        Routines, Schemas, Sequences, SshTarget, Table, TableColumn, TableColumns, Tables, Target,
+        TxAnswer, TxState,
     },
 };
 
@@ -211,6 +211,8 @@ pub struct PasswordPrompt {
     pub password: Option<String>,
     /// `None` when the SSH password is known or not needed.
     pub ssh: Option<String>,
+    /// The jump servers whose password is not known yet, by id.
+    pub jumps: Vec<(Uuid, String)>,
     pub remember: bool,
 }
 
@@ -243,6 +245,8 @@ pub struct App {
     passwords: HashMap<Uuid, String>,
     /// SSH passwords and key passphrases, kept the same way.
     ssh_secrets: HashMap<Uuid, String>,
+    /// The same for jump servers, by the id of the jump server.
+    jump_secrets: HashMap<Uuid, String>,
     pub sql_log: Vec<SqlLog>,
     pub engine_log: Vec<EngineLog>,
     pub log_tab: LogTab,
@@ -357,6 +361,7 @@ impl App {
             search: String::new(),
             passwords: HashMap::new(),
             ssh_secrets: HashMap::new(),
+            jump_secrets: HashMap::new(),
             sql_log: Vec::new(),
             engine_log: Vec::new(),
             log_tab: LogTab::Sql,
@@ -671,6 +676,7 @@ impl App {
                     // A wrong password is asked for again next time.
                     self.passwords.remove(&id);
                     self.ssh_secrets.remove(&id);
+                    self.forget_jump_secrets(id);
                     if let Some(link) = self.links.get_mut(&id) {
                         link.state = LinkState::Failed(err);
                     }
@@ -841,6 +847,7 @@ impl App {
         connection: &Connection,
         password: &str,
         ssh_secret: &str,
+        jump_secrets: &HashMap<Uuid, String>,
         session: Option<Uuid>,
     ) -> bool {
         let driver = self.data.driver_of(connection).cloned();
@@ -878,6 +885,21 @@ impl App {
             known_hosts: &known_hosts,
             remote_host: connection.host.trim(),
             remote_port: connection.port,
+            jumps: connection
+                .ssh
+                .jumps
+                .iter()
+                .map(|jump| JumpTarget {
+                    host: jump.host.trim(),
+                    port: jump.port,
+                    user: jump.username.trim(),
+                    key_file: match jump.auth {
+                        SshAuth::Key => jump.key_file.trim(),
+                        SshAuth::Password => "",
+                    },
+                    secret: jump_secrets.get(&jump.id).map_or("", String::as_str),
+                })
+                .collect(),
         });
         let target = Target {
             kind: connection.kind.engine_name(),
@@ -899,8 +921,14 @@ impl App {
     }
 
     /// Check the details in the connection form against the database.
-    pub fn test_connection(&mut self, connection: &Connection, password: &str, ssh_secret: &str) {
-        let sent = self.send_target(connection, password, ssh_secret, None);
+    pub fn test_connection(
+        &mut self,
+        connection: &Connection,
+        password: &str,
+        ssh_secret: &str,
+        jump_secrets: &HashMap<Uuid, String>,
+    ) {
+        let sent = self.send_target(connection, password, ssh_secret, jump_secrets, None);
         if let Some(editor) = &mut self.editor {
             editor.testing = sent;
             editor.test = if sent {
@@ -923,6 +951,39 @@ impl App {
             self.ssh_secrets.remove(&connection);
         } else {
             self.ssh_secrets.insert(connection, ssh_secret);
+        }
+    }
+
+    /// The same for the jump servers, by the id of the jump server.
+    pub fn keep_jump_secrets(&mut self, secrets: impl IntoIterator<Item = (Uuid, String)>) {
+        for (jump, secret) in secrets {
+            if secret.is_empty() {
+                self.jump_secrets.remove(&jump);
+            } else {
+                self.jump_secrets.insert(jump, secret);
+            }
+        }
+    }
+
+    /// What is known of the jump server passwords of a connection in this
+    /// run of the app.
+    pub fn known_jump_secrets(&self, connection: &Connection) -> HashMap<Uuid, String> {
+        connection
+            .ssh
+            .jumps
+            .iter()
+            .filter_map(|jump| Some((jump.id, self.jump_secrets.get(&jump.id)?.clone())))
+            .collect()
+    }
+
+    fn forget_jump_secrets(&mut self, connection: Uuid) {
+        let jumps: Vec<Uuid> = self
+            .data
+            .connection(connection)
+            .map(|connection| connection.ssh.jumps.iter().map(|jump| jump.id).collect())
+            .unwrap_or_default();
+        for jump in jumps {
+            self.jump_secrets.remove(&jump);
         }
     }
 
@@ -970,13 +1031,35 @@ impl App {
             };
             saved.or(with_key.then(String::new))
         };
+        // The jump servers, the same way.
+        let mut found = Vec::new();
+        let mut asked = Vec::new();
+        if connection.uses_ssh() {
+            for jump in &connection.ssh.jumps {
+                if self.jump_secrets.contains_key(&jump.id) {
+                    continue;
+                }
+                let saved = if connection.save_password {
+                    self.secrets.get(id, Secret::Jump(jump.id))
+                } else {
+                    None
+                };
+                match saved {
+                    Some(secret) => found.push((jump.id, secret)),
+                    None if jump.auth == SshAuth::Key => {}
+                    None => asked.push((jump.id, String::new())),
+                }
+            }
+        }
+        self.keep_jump_secrets(found);
         match (password, ssh) {
-            (Some(password), Some(ssh)) => self.connect_with(id, password, ssh),
+            (Some(password), Some(ssh)) if asked.is_empty() => self.connect_with(id, password, ssh),
             (password, ssh) => {
                 self.prompt = Some(PasswordPrompt {
                     connection: id,
                     password: password.is_none().then(String::new),
                     ssh: ssh.is_none().then(String::new),
+                    jumps: asked,
                     remember: false,
                 });
                 // What is known already is kept for when the box is answered.
@@ -997,6 +1080,7 @@ impl App {
                 connection,
                 &self.secrets,
                 self.known_secrets(id),
+                self.known_jump_secrets(connection),
             ));
         }
     }
@@ -1013,7 +1097,8 @@ impl App {
         let Some(connection) = self.data.connection(id).cloned() else {
             return;
         };
-        if self.send_target(&connection, &password, &ssh_secret, Some(id)) {
+        let jump_secrets = self.known_jump_secrets(&connection);
+        if self.send_target(&connection, &password, &ssh_secret, &jump_secrets, Some(id)) {
             self.keep_secrets(id, password, ssh_secret);
             self.links.insert(
                 id,
@@ -1050,6 +1135,12 @@ impl App {
         }
         self.passwords.remove(&id);
         self.ssh_secrets.remove(&id);
+        if let Some(connection) = self.data.connection(id) {
+            for jump in &connection.ssh.jumps {
+                self.jump_secrets.remove(&jump.id);
+                self.secrets.delete(id, Secret::Jump(jump.id));
+            }
+        }
         self.secrets.delete(id, Secret::Password);
         self.secrets.delete(id, Secret::Ssh);
         self.data.remove(id);
