@@ -28,12 +28,17 @@ pub struct Driver {
     pub version: String,
 }
 
-/// What the engine found in a driver jar of the user's own.
+/// What the engine found in the jar files of a driver of the user's own.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct OwnDriverInfo {
+    /// The driver class that is used. Empty when none could be loaded.
     pub class_name: String,
     pub version: String,
+    /// Every driver class in the files.
+    pub classes: Vec<String>,
+    /// Why the driver class could not be loaded, if it could not.
+    pub error: Option<String>,
 }
 
 /// A function or a procedure.
@@ -197,9 +202,12 @@ pub struct Target<'a> {
     pub user: &'a str,
     pub password: &'a str,
     pub ssh: Option<SshTarget<'a>>,
-    /// The user's own driver jar; empty for the driver inside the engine.
-    pub driver_jar: &'a str,
+    /// The jar files (or folders of jar files) of the user's own driver;
+    /// empty for the driver inside the engine.
+    pub driver_jars: &'a [String],
     pub driver_class: &'a str,
+    /// Settings handed to the user's own driver, as name and value.
+    pub properties: &'a [(String, String)],
 }
 
 impl Target<'_> {
@@ -222,9 +230,17 @@ impl Target<'_> {
                 "remotePort": ssh.remote_port,
             });
         }
-        if !self.driver_jar.is_empty() {
-            value["driverJar"] = json!(self.driver_jar);
+        if !self.driver_jars.is_empty() {
+            value["driverJars"] = json!(self.driver_jars);
             value["driverClass"] = json!(self.driver_class);
+        }
+        if !self.properties.is_empty() {
+            let properties: serde_json::Map<String, Value> = self
+                .properties
+                .iter()
+                .map(|(name, value)| (name.clone(), json!(value)))
+                .collect();
+            value["properties"] = Value::Object(properties);
         }
         value
     }
@@ -247,11 +263,11 @@ pub fn connect(session: &str, target: &Target) -> Request {
     ("connect", value)
 }
 
-/// Look into a driver jar of the user's own.
-pub fn driver_info(jar: &str, class_name: &str) -> Request {
+/// Look into the jar files of a driver of the user's own.
+pub fn driver_info(jars: &[String], class_name: &str) -> Request {
     (
         "driverInfo",
-        json!({"driverJar": jar, "driverClass": class_name}),
+        json!({"driverJars": jars, "driverClass": class_name}),
     )
 }
 

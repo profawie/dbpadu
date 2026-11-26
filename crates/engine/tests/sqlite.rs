@@ -50,8 +50,9 @@ fn select_is_always_limited() {
         user: "",
         password: "",
         ssh: None,
-        driver_jar: "",
+        driver_jars: &[],
         driver_class: "",
+        properties: &[],
     };
 
     let hello: protocol::Hello =
@@ -124,6 +125,115 @@ fn select_is_always_limited() {
 
     let error = ask(&mut engine, protocol::execute("s", "selec", 10)).unwrap_err();
     assert!(error.contains("syntax"), "{error}");
+
+    drop(engine);
+    let _ = std::fs::remove_file(&file);
+}
+
+/// A `.jar` file Maven downloaded for the engine's build, to stand in for a
+/// driver the user added.
+fn maven_jar(folder: &str, prefix: &str) -> Option<String> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    let versions = PathBuf::from(home).join(".m2/repository").join(folder);
+    for version in std::fs::read_dir(versions).ok()?.flatten() {
+        for file in std::fs::read_dir(version.path()).ok()?.flatten() {
+            let name = file.file_name().to_string_lossy().to_string();
+            if name.starts_with(prefix) && name.ends_with(".jar") {
+                return Some(file.path().display().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// A driver of the user's own: found in its `.jar` file, used to connect,
+/// and handed its connection properties.
+#[test]
+fn a_driver_from_the_users_own_jar_connects() {
+    let jar =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../engine/target/dbpadu-engine.jar");
+    let Some(driver_jar) = maven_jar("org/xerial/sqlite-jdbc", "sqlite-jdbc-") else {
+        eprintln!("skipped: no SQLite driver jar in ~/.m2");
+        return;
+    };
+    if !jar.is_file() {
+        eprintln!("skipped: {} is not built", jar.display());
+        return;
+    }
+    let java = dbpadu_engine::locate::java("");
+    let Ok(mut engine) = Engine::start(&java, &jar, || {}) else {
+        eprintln!("skipped: Java is not installed");
+        return;
+    };
+    let jars = [driver_jar];
+
+    // No class named: the engine finds the one in the file.
+    let info: protocol::OwnDriverInfo =
+        protocol::read(ask(&mut engine, protocol::driver_info(&jars, "")).unwrap()).unwrap();
+    assert_eq!(info.class_name, "org.sqlite.JDBC");
+    assert!(info.classes.contains(&"org.sqlite.JDBC".to_string()));
+    assert!(info.version.starts_with(|c: char| c.is_ascii_digit()));
+    assert_eq!(info.error, None);
+
+    // A class that is not there: the classes that are there are still listed.
+    let info: protocol::OwnDriverInfo = protocol::read(
+        ask(
+            &mut engine,
+            protocol::driver_info(&jars, "com.example.Nope"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        info.error
+            .is_some_and(|error| error.contains("com.example.Nope"))
+    );
+    assert!(info.classes.contains(&"org.sqlite.JDBC".to_string()));
+
+    let missing = ["/nowhere/driver.jar".to_string()];
+    let error = ask(&mut engine, protocol::driver_info(&missing, "")).unwrap_err();
+    assert!(error.contains("not found"), "{error}");
+
+    // `kind` is "other": nothing is added to the SQL, the driver alone
+    // keeps the row limit. The property makes the connection read-only.
+    let properties = [("open_mode".to_string(), "1".to_string())];
+    let file = std::env::temp_dir().join(format!("dbpadu-own-{}.db", std::process::id()));
+    std::fs::write(&file, b"").unwrap();
+    let url = format!("jdbc:sqlite:{}", file.display());
+    let target = Target {
+        kind: "other",
+        url: &url,
+        user: "",
+        password: "",
+        ssh: None,
+        driver_jars: &jars,
+        driver_class: "org.sqlite.JDBC",
+        properties: &properties,
+    };
+    let connected: Connected =
+        protocol::read(ask(&mut engine, protocol::connect("own", &target)).unwrap()).unwrap();
+    assert_eq!(connected.product, "SQLite");
+    let rows: QueryResult = protocol::read(
+        ask(
+            &mut engine,
+            protocol::execute(
+                "own",
+                "with recursive n(i) as (select 1 union all select i + 1 from n where i < 50) \
+                 select i from n",
+                10,
+            ),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(rows.added, None);
+    assert_eq!(rows.rows.len(), 10);
+    let error = ask(
+        &mut engine,
+        protocol::execute("own", "create table t (n integer)", 10),
+    )
+    .unwrap_err();
+    assert!(error.to_lowercase().contains("read"), "{error}");
 
     drop(engine);
     let _ = std::fs::remove_file(&file);

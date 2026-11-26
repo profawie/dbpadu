@@ -27,6 +27,10 @@ use serde_json::json;
 
 pub use serde_json::Value;
 
+// The shared libraries form a chain: this one takes Rust's standard library
+// and serde from `dbpadu_core` instead of carrying a second copy.
+pub use dbpadu_core::APP_NAME;
+
 /// Memory the engine may use. Together with the row limit this keeps a
 /// large table from taking the computer down.
 const ENGINE_MEMORY: &str = "-Xmx512m";

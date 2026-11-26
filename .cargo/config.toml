@@ -1,0 +1,14 @@
+# The crates of crates/ are shared libraries. So that they share one copy of
+# Rust's standard library, it is a shared library too ("prefer-dynamic");
+# the build scripts copy it to dist/ with the others.
+#
+# The program finds its libraries in its own folder. Windows looks there by
+# itself.
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "prefer-dynamic", "-C", "link-arg=-Wl,-rpath,$ORIGIN"]
+
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "prefer-dynamic", "-C", "link-arg=-Wl,-rpath,@loader_path"]
+
+[target.'cfg(windows)']
+rustflags = ["-C", "prefer-dynamic"]

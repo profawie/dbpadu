@@ -40,9 +40,13 @@ pub enum DbKind {
     SqlServer,
     Oracle,
     Sqlite,
+    /// Any other database, through a JDBC driver the user adds. There is no
+    /// driver for it inside the engine.
+    Other,
 }
 
 impl DbKind {
+    /// The kinds with a driver inside the engine.
     pub const ALL: [DbKind; 6] = [
         DbKind::Postgres,
         DbKind::MySql,
@@ -50,6 +54,17 @@ impl DbKind {
         DbKind::SqlServer,
         DbKind::Oracle,
         DbKind::Sqlite,
+    ];
+
+    /// The kinds a driver of the user's own can be for.
+    pub const WITH_OTHER: [DbKind; 7] = [
+        DbKind::Postgres,
+        DbKind::MySql,
+        DbKind::MariaDb,
+        DbKind::SqlServer,
+        DbKind::Oracle,
+        DbKind::Sqlite,
+        DbKind::Other,
     ];
 
     /// Name shown to the user.
@@ -61,6 +76,7 @@ impl DbKind {
             DbKind::SqlServer => "SQL Server",
             DbKind::Oracle => "Oracle",
             DbKind::Sqlite => "SQLite",
+            DbKind::Other => "Other",
         }
     }
 
@@ -73,6 +89,7 @@ impl DbKind {
             DbKind::SqlServer => "MS",
             DbKind::Oracle => "OR",
             DbKind::Sqlite => "SL",
+            DbKind::Other => "DB",
         }
     }
 
@@ -85,23 +102,40 @@ impl DbKind {
             DbKind::SqlServer => "sqlserver",
             DbKind::Oracle => "oracle",
             DbKind::Sqlite => "sqlite",
+            DbKind::Other => "other",
         }
     }
 
-    /// `None` for a database that is a file.
+    /// `None` for a database that is a file, and for one whose port is
+    /// not known.
     pub fn default_port(self) -> Option<u16> {
         match self {
             DbKind::Postgres => Some(5432),
             DbKind::MySql | DbKind::MariaDb => Some(3306),
             DbKind::SqlServer => Some(1433),
             DbKind::Oracle => Some(1521),
-            DbKind::Sqlite => None,
+            DbKind::Sqlite | DbKind::Other => None,
         }
     }
 
     /// A database that is a file on this computer, not a server.
     pub fn is_file(self) -> bool {
-        self.default_port().is_none()
+        self == DbKind::Sqlite
+    }
+
+    /// The address of a database of this kind, with `{host}`, `{port}` and
+    /// `{database}` where the connection's details go. See
+    /// [`expand_template`].
+    pub fn url_template(self) -> &'static str {
+        match self {
+            DbKind::Postgres => "jdbc:postgresql://{host}:{port}/{database}",
+            DbKind::MySql => "jdbc:mysql://{host}:{port}/{database}",
+            DbKind::MariaDb => "jdbc:mariadb://{host}:{port}/{database}",
+            DbKind::SqlServer => "jdbc:sqlserver://{host}:{port}[;databaseName={database}]",
+            DbKind::Oracle => "jdbc:oracle:thin:@//{host}:{port}/{database}",
+            DbKind::Sqlite => "jdbc:sqlite:{database}",
+            DbKind::Other => "",
+        }
     }
 
     pub fn default_user(self) -> &'static str {
@@ -110,7 +144,7 @@ impl DbKind {
             DbKind::MySql | DbKind::MariaDb => "root",
             DbKind::SqlServer => "sa",
             DbKind::Oracle => "system",
-            DbKind::Sqlite => "",
+            DbKind::Sqlite | DbKind::Other => "",
         }
     }
 
@@ -142,6 +176,9 @@ pub struct Connection {
     pub id: Uuid,
     pub name: String,
     pub kind: DbKind,
+    /// The driver of the user's own it connects with. `None`: the driver
+    /// for its kind inside the engine.
+    pub driver: Option<Uuid>,
     pub host: String,
     pub port: u16,
     /// Database name, Oracle service name, or the path of a SQLite file.
@@ -206,6 +243,7 @@ impl Connection {
             id: Uuid::new_v4(),
             name: String::new(),
             kind,
+            driver: None,
             host: "localhost".to_string(),
             port: kind.default_port().unwrap_or(0),
             database: String::new(),
@@ -222,24 +260,35 @@ impl Connection {
         self.ssh.enabled && !self.kind.is_file()
     }
 
-    /// Switch to another kind of database. Fields that still hold the old
-    /// kind's defaults move to the new kind's defaults; anything the user
-    /// typed stays.
-    pub fn set_kind(&mut self, kind: DbKind) {
-        let old = self.kind;
-        if self.port == old.default_port().unwrap_or(0) {
-            self.port = kind.default_port().unwrap_or(0);
+    /// Switch to another driver: the one inside the engine for `kind`, or
+    /// `driver`, one of the user's own. `old` is the user's own driver it
+    /// had until now, if any. Fields that still hold the old driver's
+    /// defaults move to the new one's; anything the user typed stays.
+    pub fn set_driver(&mut self, old: Option<&Driver>, kind: DbKind, driver: Option<&Driver>) {
+        let before = Defaults::of(self.kind, old);
+        let after = Defaults::of(kind, driver);
+        if self.port == before.port {
+            self.port = after.port;
         }
-        if self.username == old.default_user() {
-            self.username = kind.default_user().to_string();
+        if self.username == before.user {
+            self.username = after.user;
         }
-        if self.params == old.default_params() {
-            self.params = kind.default_params().to_string();
+        if self.params == before.params {
+            self.params = after.params;
         }
-        if old.is_file() != kind.is_file() {
+        if self.kind.is_file() != kind.is_file() {
             self.database.clear();
         }
+        if self.database == before.database {
+            self.database = after.database;
+        }
         self.kind = kind;
+        self.driver = driver.map(|driver| driver.id);
+    }
+
+    /// Switch to the driver inside the engine for another kind of database.
+    pub fn set_kind(&mut self, kind: DbKind) {
+        self.set_driver(None, kind, None);
     }
 
     /// The name on the card: the name given, or where it connects to.
@@ -271,57 +320,67 @@ impl Connection {
         text
     }
 
-    /// The address the engine's JDBC driver connects to.
-    pub fn jdbc_url(&self) -> String {
-        self.jdbc_url_at(self.host.trim(), &self.port.to_string())
+    /// The address the engine's JDBC driver connects to. `driver` is the
+    /// user's own driver of this connection, if it has one.
+    pub fn jdbc_url(&self, driver: Option<&Driver>) -> String {
+        self.jdbc_url_at(driver, self.host.trim(), &self.port.to_string())
     }
 
     /// The address when the database is reached through an SSH tunnel: the
     /// tunnel's end on this computer. The engine fills in the port once the
     /// tunnel is open.
-    pub fn jdbc_url_through_tunnel(&self) -> String {
-        self.jdbc_url_at("127.0.0.1", TUNNEL_PORT)
+    pub fn jdbc_url_through_tunnel(&self, driver: Option<&Driver>) -> String {
+        self.jdbc_url_at(driver, "127.0.0.1", TUNNEL_PORT)
     }
 
-    fn jdbc_url_at(&self, host: &str, port: &str) -> String {
-        let database = self.database.trim();
-        let params = self.params.trim().trim_start_matches(['?', ';', '&']);
-        let query = if params.is_empty() {
-            String::new()
-        } else {
-            format!("?{params}")
+    fn jdbc_url_at(&self, driver: Option<&Driver>, host: &str, port: &str) -> String {
+        let template = match driver {
+            Some(driver) => driver.url_template.trim(),
+            None => self.kind.url_template(),
         };
+        // No port typed: the optional parts of the template that need it go.
+        let port = if port == "0" { "" } else { port };
+        let url = expand_template(
+            template,
+            host,
+            port,
+            self.database.trim(),
+            self.username.trim(),
+        );
+        let params = self.params.trim().trim_start_matches(['?', ';', '&']);
+        if params.is_empty() {
+            return url;
+        }
         match self.kind {
-            DbKind::Postgres => format!("jdbc:postgresql://{host}:{port}/{database}{query}"),
-            DbKind::MySql => format!("jdbc:mysql://{host}:{port}/{database}{query}"),
-            DbKind::MariaDb => format!("jdbc:mariadb://{host}:{port}/{database}{query}"),
-            DbKind::SqlServer => {
-                let mut url = format!("jdbc:sqlserver://{host}:{port}");
-                if !database.is_empty() {
-                    url.push_str(&format!(";databaseName={database}"));
-                }
-                if !params.is_empty() {
-                    url.push_str(&format!(";{params}"));
-                }
-                url
-            }
-            DbKind::Oracle => format!("jdbc:oracle:thin:@//{host}:{port}/{database}"),
-            DbKind::Sqlite => format!("jdbc:sqlite:{database}{query}"),
+            DbKind::SqlServer => format!("{url};{params}"),
+            // The thin driver's address has no place for them.
+            DbKind::Oracle => url,
+            _ if url.contains('?') => format!("{url}&{params}"),
+            _ => format!("{url}?{params}"),
         }
     }
 
     /// What is still missing before it can be saved, in words for the user.
-    pub fn problem(&self) -> Option<&'static str> {
+    /// `driver` is the user's own driver of this connection, if it has one.
+    pub fn problem(&self, driver: Option<&Driver>) -> Option<&'static str> {
+        if self.driver.is_some() != driver.is_some()
+            || (self.kind == DbKind::Other && driver.is_none())
+        {
+            return Some("Choose a driver. The one this connection used was deleted.");
+        }
         if self.kind.is_file() {
             if self.database.trim().is_empty() {
                 return Some("Choose the database file.");
             }
             return None;
         }
-        if self.host.trim().is_empty() {
+        // One of the user's own drivers says in its template what it needs.
+        let template = driver.map(|driver| driver.url_template.as_str());
+        let needs = |name: &str| template.is_none_or(|template| required(template, name));
+        if self.host.trim().is_empty() && (needs("host") || self.ssh.enabled) {
             return Some("Enter the host.");
         }
-        if self.port == 0 {
+        if self.port == 0 && (needs("port") || self.ssh.enabled) {
             return Some("Enter the port.");
         }
         if self.kind == DbKind::Oracle && self.database.trim().is_empty() {
@@ -340,6 +399,272 @@ impl Connection {
         }
         None
     }
+}
+
+/// What a new connection starts with.
+struct Defaults {
+    port: u16,
+    user: String,
+    database: String,
+    params: String,
+}
+
+impl Defaults {
+    fn of(kind: DbKind, driver: Option<&Driver>) -> Self {
+        match driver {
+            Some(driver) => Self {
+                port: driver.default_port,
+                user: driver.default_user.trim().to_string(),
+                database: driver.default_database.trim().to_string(),
+                params: String::new(),
+            },
+            None => Self {
+                port: kind.default_port().unwrap_or(0),
+                user: kind.default_user().to_string(),
+                database: String::new(),
+                params: kind.default_params().to_string(),
+            },
+        }
+    }
+}
+
+/// A setting handed to a JDBC driver when it connects, such as
+/// `useSSL` = `false`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Property {
+    pub name: String,
+    pub value: String,
+}
+
+/// A JDBC driver the user added: its `.jar` files and how to connect with
+/// it. Several drivers for the same kind of database live side by side, for
+/// example one for MySQL 5 and one for MySQL 8; each connection names the
+/// one it uses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Driver {
+    pub id: Uuid,
+    /// The name it is chosen by, such as `MySQL 5`.
+    pub name: String,
+    /// The version to show next to the name. Empty: the version the engine
+    /// reads from the `.jar` file.
+    pub version: String,
+    /// The kind of database it talks to. Decides how the row limit is
+    /// written and how the tree is read.
+    pub kind: DbKind,
+    /// The driver class. Empty: the one the `.jar` file announces.
+    pub class_name: String,
+    /// See [`expand_template`].
+    pub url_template: String,
+    /// 0 for none.
+    pub default_port: u16,
+    pub default_database: String,
+    pub default_user: String,
+    pub description: String,
+    /// `.jar` files, and folders of `.jar` files.
+    pub libraries: Vec<String>,
+    /// Handed to the driver with every connection.
+    pub properties: Vec<Property>,
+}
+
+/// What a field missing from the saved file is read as: nothing. A new
+/// driver starts from [`Driver::new`] instead.
+impl Default for Driver {
+    fn default() -> Self {
+        Self {
+            url_template: String::new(),
+            default_port: 0,
+            default_user: String::new(),
+            ..Self::new(DbKind::default())
+        }
+    }
+}
+
+impl Driver {
+    /// A driver for `kind`, set up like the one inside the engine.
+    pub fn new(kind: DbKind) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name: String::new(),
+            version: String::new(),
+            kind,
+            class_name: String::new(),
+            url_template: kind.url_template().to_string(),
+            default_port: kind.default_port().unwrap_or(0),
+            default_database: String::new(),
+            default_user: kind.default_user().to_string(),
+            description: String::new(),
+            libraries: Vec::new(),
+            properties: Vec::new(),
+        }
+    }
+
+    /// Switch to another kind of database. The template, port and user move
+    /// to the new kind's while they still hold the old kind's.
+    pub fn set_kind(&mut self, kind: DbKind) {
+        let old = self.kind;
+        if self.url_template.trim() == old.url_template() {
+            self.url_template = kind.url_template().to_string();
+        }
+        if self.default_port == old.default_port().unwrap_or(0) {
+            self.default_port = kind.default_port().unwrap_or(0);
+        }
+        if self.default_user.trim() == old.default_user() {
+            self.default_user = kind.default_user().to_string();
+        }
+        self.kind = kind;
+    }
+
+    /// The `.jar` files and folders, without empty lines.
+    pub fn library_paths(&self) -> Vec<String> {
+        self.libraries
+            .iter()
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+            .collect()
+    }
+
+    /// The properties that have a name.
+    pub fn set_properties(&self) -> Vec<(String, String)> {
+        self.properties
+            .iter()
+            .filter(|property| !property.name.trim().is_empty())
+            .map(|property| (property.name.trim().to_string(), property.value.clone()))
+            .collect()
+    }
+
+    /// An address made from the template, to show what it gives.
+    pub fn example_url(&self) -> String {
+        let port = match self.default_port {
+            0 => String::new(),
+            port => port.to_string(),
+        };
+        let database = match self.default_database.trim() {
+            "" if self.kind.is_file() => "shop.db",
+            "" => "shop",
+            database => database,
+        };
+        expand_template(
+            self.url_template.trim(),
+            "localhost",
+            &port,
+            database,
+            self.default_user.trim(),
+        )
+    }
+
+    /// What is still missing before it can be saved, in words for the user.
+    pub fn problem(&self) -> Option<&'static str> {
+        if self.name.trim().is_empty() {
+            return Some("Enter a name for the driver.");
+        }
+        if self.library_paths().is_empty() {
+            return Some("Add the driver's .jar file.");
+        }
+        let template = self.url_template.trim();
+        if template.is_empty() {
+            return Some("Enter the URL template.");
+        }
+        if !template.starts_with("jdbc:") {
+            return Some("The URL template starts with jdbc:");
+        }
+        if template.matches('[').count() != template.matches(']').count() {
+            return Some("The URL template has a [ without its ].");
+        }
+        None
+    }
+}
+
+/// The value a `{name}` of a template stands for, if the name is known.
+fn template_value<'a>(
+    name: &str,
+    host: &'a str,
+    port: &'a str,
+    database: &'a str,
+    user: &'a str,
+) -> Option<&'a str> {
+    match name {
+        "host" | "server" => Some(host),
+        "port" => Some(port),
+        "database" | "file" | "folder" => Some(database),
+        "user" => Some(user),
+        _ => None,
+    }
+}
+
+/// Fill in a URL template, the way DBeaver writes them:
+///
+/// - `{host}`, `{port}`, `{database}` and `{user}` are replaced by the
+///   connection's details (`{server}` and `{file}` work too);
+/// - a part in `[` `]` is left out when something it names is empty, so
+///   `jdbc:mysql://{host}[:{port}]/[{database}]` gives
+///   `jdbc:mysql://localhost/` for a connection without port and database.
+///
+/// Anything else, an unknown `{name}` included, is kept as it is.
+pub fn expand_template(
+    template: &str,
+    host: &str,
+    port: &str,
+    database: &str,
+    user: &str,
+) -> String {
+    // One entry per open `[`: the text so far and whether it stays.
+    let mut stack: Vec<(String, bool)> = vec![(String::new(), true)];
+    let mut rest = template;
+    while let Some(c) = rest.chars().next() {
+        rest = &rest[c.len_utf8()..];
+        match c {
+            '[' => stack.push((String::new(), true)),
+            ']' if stack.len() > 1 => {
+                let (text, keep) = stack.pop().expect("more than one");
+                if keep {
+                    stack.last_mut().expect("the base").0.push_str(&text);
+                }
+            }
+            '{' => {
+                let value = rest.split_once('}').and_then(|(name, after)| {
+                    template_value(name, host, port, database, user).map(|value| (value, after))
+                });
+                let top = stack.last_mut().expect("the base");
+                match value {
+                    Some((value, after)) => {
+                        top.0.push_str(value);
+                        top.1 &= !value.is_empty();
+                        rest = after;
+                    }
+                    None => top.0.push(c),
+                }
+            }
+            c => stack.last_mut().expect("the base").0.push(c),
+        }
+    }
+    // A `[` that was never closed: keep what it holds.
+    let mut url = String::new();
+    for (text, _) in stack {
+        url.push_str(&text);
+    }
+    url
+}
+
+/// Whether a template cannot do without `{name}`: it names it outside
+/// every `[` `]`.
+pub fn required(template: &str, name: &str) -> bool {
+    let mut depth = 0usize;
+    let mut rest = template;
+    let wanted = format!("{{{name}}}");
+    while let Some(c) = rest.chars().next() {
+        if depth == 0 && rest.starts_with(&wanted) {
+            return true;
+        }
+        match c {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        rest = &rest[c.len_utf8()..];
+    }
+    false
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -372,13 +697,15 @@ pub struct Settings {
     /// The `java` program to start the engine with. Empty: look in
     /// `JAVA_HOME`, then on `PATH`.
     pub java_path: String,
-    /// The user's own JDBC drivers, used instead of the ones in the engine.
+    /// From version 0.1.1: one driver `.jar` per kind of database. Turned
+    /// into [`Data::drivers`] when the file is loaded, and not written again.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub drivers: BTreeMap<DbKind, OwnDriver>,
     /// Whether the log panel at the bottom is open.
     pub log_open: bool,
 }
 
-/// A JDBC driver from a jar file of the user's choosing.
+/// How version 0.1.1 kept a JDBC driver of the user's choosing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct OwnDriver {
@@ -454,10 +781,94 @@ impl Default for Settings {
 pub struct Data {
     pub connections: Vec<Connection>,
     pub groups: Vec<Group>,
+    /// The JDBC drivers the user added.
+    pub drivers: Vec<Driver>,
     pub settings: Settings,
 }
 
 impl Data {
+    pub fn driver(&self, id: Uuid) -> Option<&Driver> {
+        self.drivers.iter().find(|driver| driver.id == id)
+    }
+
+    /// The user's own driver a connection uses. `None` for the driver
+    /// inside the engine, and for a driver that was deleted.
+    pub fn driver_of(&self, connection: &Connection) -> Option<&Driver> {
+        connection.driver.and_then(|id| self.driver(id))
+    }
+
+    /// Add the driver, or replace the saved one with the same id. The list
+    /// stays sorted by kind of database, then by name.
+    pub fn upsert_driver(&mut self, mut driver: Driver) {
+        driver.name = driver.name.trim().to_string();
+        driver.libraries = driver.library_paths();
+        driver
+            .properties
+            .retain(|property| !property.name.trim().is_empty());
+        // Connections follow the driver to another kind of database.
+        for connection in &mut self.connections {
+            if connection.driver == Some(driver.id) {
+                connection.kind = driver.kind;
+            }
+        }
+        match self.drivers.iter_mut().find(|saved| saved.id == driver.id) {
+            Some(saved) => *saved = driver,
+            None => self.drivers.push(driver),
+        }
+        self.drivers
+            .sort_by_cached_key(|driver| (driver.kind, driver.name.to_lowercase()));
+    }
+
+    /// How many connections use one of the user's own drivers.
+    pub fn driver_uses(&self, id: Uuid) -> usize {
+        self.connections
+            .iter()
+            .filter(|connection| connection.driver == Some(id))
+            .count()
+    }
+
+    /// Delete a driver. Refused while a connection uses it.
+    pub fn remove_driver(&mut self, id: Uuid) -> Result<(), &'static str> {
+        if self.driver_uses(id) > 0 {
+            return Err("A connection uses this driver. Give the connection another driver first.");
+        }
+        self.drivers.retain(|driver| driver.id != id);
+        Ok(())
+    }
+
+    /// A copy of a driver under a new name, to change into another version.
+    pub fn duplicate_driver(&self, id: Uuid) -> Option<Driver> {
+        let driver = self.driver(id)?;
+        Some(Driver {
+            id: Uuid::new_v4(),
+            name: format!("{} (copy)", driver.name),
+            ..driver.clone()
+        })
+    }
+
+    /// Bring a file of an older version up to date: the one driver `.jar`
+    /// per kind of 0.1.1 becomes a driver in the list, and the connections
+    /// of that kind use it, as they did.
+    pub fn migrate(&mut self) {
+        for (kind, own) in std::mem::take(&mut self.settings.drivers) {
+            if own.jar.trim().is_empty() {
+                continue;
+            }
+            let driver = Driver {
+                name: format!("{} (own driver)", kind.label()),
+                class_name: own.class_name.trim().to_string(),
+                libraries: vec![own.jar.trim().to_string()],
+                ..Driver::new(kind)
+            };
+            for connection in &mut self.connections {
+                if connection.kind == kind && connection.driver.is_none() {
+                    connection.driver = Some(driver.id);
+                }
+            }
+            self.upsert_driver(driver);
+        }
+    }
+
     pub fn connection(&self, id: Uuid) -> Option<&Connection> {
         self.connections
             .iter()
@@ -624,36 +1035,36 @@ mod tests {
     #[test]
     fn jdbc_urls() {
         assert_eq!(
-            connection(DbKind::Postgres).jdbc_url(),
+            connection(DbKind::Postgres).jdbc_url(None),
             "jdbc:postgresql://db.example.com:5432/shop"
         );
         assert_eq!(
-            connection(DbKind::MySql).jdbc_url(),
+            connection(DbKind::MySql).jdbc_url(None),
             "jdbc:mysql://db.example.com:3306/shop"
         );
         assert_eq!(
-            connection(DbKind::MariaDb).jdbc_url(),
+            connection(DbKind::MariaDb).jdbc_url(None),
             "jdbc:mariadb://db.example.com:3306/shop"
         );
         assert_eq!(
-            connection(DbKind::SqlServer).jdbc_url(),
+            connection(DbKind::SqlServer).jdbc_url(None),
             "jdbc:sqlserver://db.example.com:1433;databaseName=shop;encrypt=true;trustServerCertificate=true"
         );
         assert_eq!(
-            connection(DbKind::Oracle).jdbc_url(),
+            connection(DbKind::Oracle).jdbc_url(None),
             "jdbc:oracle:thin:@//db.example.com:1521/shop"
         );
         let file = Connection {
             database: "C:\\data\\shop.db".into(),
             ..Connection::new(DbKind::Sqlite)
         };
-        assert_eq!(file.jdbc_url(), "jdbc:sqlite:C:\\data\\shop.db");
+        assert_eq!(file.jdbc_url(None), "jdbc:sqlite:C:\\data\\shop.db");
     }
 
     #[test]
     fn a_tunnel_address_points_at_this_computer() {
         assert_eq!(
-            connection(DbKind::Postgres).jdbc_url_through_tunnel(),
+            connection(DbKind::Postgres).jdbc_url_through_tunnel(None),
             "jdbc:postgresql://127.0.0.1:${TUNNEL_PORT}/shop"
         );
     }
@@ -751,12 +1162,12 @@ mod tests {
     fn an_ssh_tunnel_needs_its_details() {
         let mut c = connection(DbKind::Postgres);
         c.ssh.enabled = true;
-        assert_eq!(c.problem(), Some("Enter the SSH host."));
+        assert_eq!(c.problem(None), Some("Enter the SSH host."));
         c.ssh.host = "bastion".into();
         c.ssh.username = "me".into();
-        assert_eq!(c.problem(), None);
+        assert_eq!(c.problem(None), None);
         c.ssh.auth = SshAuth::Key;
-        assert!(c.problem().is_some());
+        assert!(c.problem(None).is_some());
     }
 
     #[test]
@@ -764,7 +1175,7 @@ mod tests {
         let mut pg = connection(DbKind::Postgres);
         pg.params = "?sslmode=require".into();
         assert_eq!(
-            pg.jdbc_url(),
+            pg.jdbc_url(None),
             "jdbc:postgresql://db.example.com:5432/shop?sslmode=require"
         );
     }
@@ -791,10 +1202,167 @@ mod tests {
     #[test]
     fn missing_fields_are_reported() {
         let mut c = Connection::new(DbKind::Postgres);
-        assert_eq!(c.problem(), None);
+        assert_eq!(c.problem(None), None);
         c.host.clear();
-        assert!(c.problem().is_some());
-        assert!(Connection::new(DbKind::Sqlite).problem().is_some());
+        assert!(c.problem(None).is_some());
+        assert!(Connection::new(DbKind::Sqlite).problem(None).is_some());
+    }
+
+    #[test]
+    fn templates_are_filled_in() {
+        let mysql = "jdbc:mysql://{host}[:{port}]/[{database}]";
+        assert_eq!(
+            expand_template(mysql, "db", "3306", "shop", ""),
+            "jdbc:mysql://db:3306/shop"
+        );
+        assert_eq!(expand_template(mysql, "db", "", "", ""), "jdbc:mysql://db/");
+        // A part inside a part, DBeaver's names, and what is not known.
+        assert_eq!(
+            expand_template(
+                "jdbc:x:{server}[:{port}[/{file}]]{other}",
+                "h",
+                "1",
+                "",
+                "u"
+            ),
+            "jdbc:x:h:1{other}"
+        );
+        assert_eq!(
+            expand_template("jdbc:x:[{user}@]{host}", "h", "", "", "me"),
+            "jdbc:x:me@h"
+        );
+        assert_eq!(
+            expand_template("jdbc:x:{host", "h", "", "", ""),
+            "jdbc:x:{host"
+        );
+        assert_eq!(
+            expand_template("jdbc:x:[{host}", "h", "", "", ""),
+            "jdbc:x:h"
+        );
+        assert!(required(mysql, "host"));
+        assert!(!required(mysql, "port"));
+        assert!(!required("jdbc:h2:{file}", "host"));
+    }
+
+    fn mysql5() -> Driver {
+        Driver {
+            name: "MySQL 5".into(),
+            class_name: "com.mysql.jdbc.Driver".into(),
+            url_template: "jdbc:mysql://{host}[:{port}]/[{database}]".into(),
+            libraries: vec!["/drivers/mysql-connector-java-5.1.49.jar".into()],
+            ..Driver::new(DbKind::MySql)
+        }
+    }
+
+    #[test]
+    fn a_connection_uses_the_template_of_its_own_driver() {
+        let driver = mysql5();
+        let mut c = connection(DbKind::MySql);
+        c.driver = Some(driver.id);
+        c.database.clear();
+        c.params = "useSSL=false".into();
+        assert_eq!(
+            c.jdbc_url(Some(&driver)),
+            "jdbc:mysql://db.example.com:3306/?useSSL=false"
+        );
+        assert_eq!(
+            c.jdbc_url_through_tunnel(Some(&driver)),
+            "jdbc:mysql://127.0.0.1:${TUNNEL_PORT}/?useSSL=false"
+        );
+        assert_eq!(c.problem(Some(&driver)), None);
+        // The driver was deleted.
+        assert!(c.problem(None).is_some());
+    }
+
+    #[test]
+    fn drivers_for_the_same_database_live_side_by_side() {
+        let mut data = Data::default();
+        let old = mysql5();
+        let new = Driver {
+            name: "MySQL 8".into(),
+            libraries: vec!["/drivers/mysql-connector-j-8.4.0.jar".into()],
+            ..Driver::new(DbKind::MySql)
+        };
+        data.upsert_driver(new.clone());
+        data.upsert_driver(old.clone());
+        let names: Vec<&str> = data.drivers.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["MySQL 5", "MySQL 8"]);
+
+        let mut legacy = Connection::new(DbKind::MySql);
+        legacy.set_driver(None, DbKind::MySql, Some(&old));
+        data.upsert(legacy.clone());
+        data.upsert(Connection::new(DbKind::MySql));
+        assert_eq!(
+            data.driver_of(&legacy).map(|d| d.name.as_str()),
+            Some("MySQL 5")
+        );
+        assert_eq!(data.driver_of(&data.connections[1]), None);
+        assert_eq!((data.driver_uses(old.id), data.driver_uses(new.id)), (1, 0));
+
+        // A driver in use stays; a copy is a driver of its own.
+        assert!(data.remove_driver(old.id).is_err());
+        assert_eq!(data.remove_driver(new.id), Ok(()));
+        let copy = data.duplicate_driver(old.id).unwrap();
+        assert_ne!(copy.id, old.id);
+        assert_eq!(copy.name, "MySQL 5 (copy)");
+    }
+
+    #[test]
+    fn choosing_a_driver_moves_defaults_but_keeps_what_was_typed() {
+        let h2 = Driver {
+            name: "H2".into(),
+            url_template: "jdbc:h2:tcp://{host}[:{port}]/{database}".into(),
+            default_port: 9092,
+            default_user: "sa".into(),
+            default_database: "test".into(),
+            libraries: vec!["h2.jar".into()],
+            ..Driver::new(DbKind::Other)
+        };
+        let mut c = Connection::new(DbKind::Postgres);
+        c.set_driver(None, DbKind::Other, Some(&h2));
+        assert_eq!(
+            (c.port, c.username.as_str(), c.database.as_str()),
+            (9092, "sa", "test")
+        );
+        assert_eq!(c.jdbc_url(Some(&h2)), "jdbc:h2:tcp://localhost:9092/test");
+        c.username = "app".into();
+        c.set_driver(Some(&h2), DbKind::SqlServer, None);
+        assert_eq!(
+            (c.port, c.username.as_str(), c.database.as_str()),
+            (1433, "app", "")
+        );
+        assert_eq!(c.params, DbKind::SqlServer.default_params());
+        assert_eq!(c.driver, None);
+    }
+
+    #[test]
+    fn a_driver_says_what_is_missing() {
+        let mut driver = Driver::new(DbKind::Other);
+        assert_eq!(driver.problem(), Some("Enter a name for the driver."));
+        driver.name = "H2".into();
+        assert_eq!(driver.problem(), Some("Add the driver's .jar file."));
+        driver.libraries.push(" h2.jar ".into());
+        assert_eq!(driver.problem(), Some("Enter the URL template."));
+        driver.url_template = "jdbc:h2:{file}".into();
+        assert_eq!(driver.problem(), None);
+        assert_eq!(driver.example_url(), "jdbc:h2:shop");
+    }
+
+    #[test]
+    fn the_own_drivers_of_0_1_1_become_drivers_in_the_list() {
+        let mut data: Data = serde_json::from_str(
+            r#"{"connections":[{"name":"a","kind":"mysql"},{"name":"b","kind":"postgres"}],
+                "settings":{"drivers":{"mysql":{"jar":"C:\\drivers\\my5.jar","class_name":"com.mysql.jdbc.Driver"}}}}"#,
+        )
+        .unwrap();
+        data.migrate();
+        assert_eq!(data.drivers.len(), 1);
+        let driver = &data.drivers[0];
+        assert_eq!(driver.name, "MySQL (own driver)");
+        assert_eq!(driver.libraries, [r"C:\drivers\my5.jar"]);
+        assert_eq!(data.connections[0].driver, Some(driver.id));
+        assert_eq!(data.connections[1].driver, None);
+        assert!(!serde_json::to_string(&data).unwrap().contains(r#""jar""#));
     }
 
     #[test]

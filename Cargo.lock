@@ -850,21 +850,15 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "dbpadu"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
- "chrono",
- "dbpadu-core",
- "dbpadu-engine",
- "eframe",
- "egui_extras",
- "rfd",
- "uuid",
+ "dbpadu-ui",
  "winresource",
 ]
 
 [[package]]
 name = "dbpadu-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "directories",
  "keyring",
@@ -876,10 +870,24 @@ dependencies = [
 
 [[package]]
 name = "dbpadu-engine"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
+ "dbpadu-core",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "dbpadu-ui"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "dbpadu-core",
+ "dbpadu-engine",
+ "eframe",
+ "egui_extras",
+ "rfd",
+ "uuid",
 ]
 
 [[package]]

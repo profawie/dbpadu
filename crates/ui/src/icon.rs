@@ -7,11 +7,11 @@
 use eframe::egui;
 
 /// Full square logo, as Windows and Linux show it.
-const LOGO_PNG: &[u8] = include_bytes!("../assets/icon/dbpadu-256.png");
+const LOGO_PNG: &[u8] = include_bytes!("../../../assets/icon/dbpadu-256.png");
 
 /// macOS draws icons smaller than their canvas, with a clear margin around.
 #[cfg(target_os = "macos")]
-const DOCK_PNG: &[u8] = include_bytes!("../assets/icon/dbpadu-macos-512.png");
+const DOCK_PNG: &[u8] = include_bytes!("../../../assets/icon/dbpadu-macos-512.png");
 
 /// Icon of the window, the taskbar button and the macOS Dock.
 pub fn window_icon() -> egui::IconData {

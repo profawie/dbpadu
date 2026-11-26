@@ -1,6 +1,7 @@
 //! Pages and shared UI components.
 
 pub mod about;
+pub mod drivers;
 pub mod editor;
 pub mod highlight;
 pub mod home;
@@ -63,6 +64,7 @@ pub fn kind_color(kind: DbKind) -> Color32 {
         DbKind::SqlServer => (0xB3, 0x26, 0x1E),
         DbKind::Oracle => (0xC2, 0x41, 0x0C),
         DbKind::Sqlite => (0x0B, 0x6F, 0xB5),
+        DbKind::Other => (0x5B, 0x61, 0x6B),
     };
     Color32::from_rgb(r, g, b)
 }
@@ -182,7 +184,7 @@ mod tests {
 
     #[test]
     fn white_text_is_readable_on_every_kind_badge() {
-        for kind in DbKind::ALL {
+        for kind in DbKind::WITH_OTHER {
             let [r, g, b, _] = kind_color(kind).to_array();
             let lin = |v: u8| {
                 let v = v as f32 / 255.0;

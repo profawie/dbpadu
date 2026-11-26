@@ -35,6 +35,7 @@ impl Store {
         match fs::read_to_string(path) {
             Ok(text) => serde_json::from_str::<Data>(&text)
                 .map(|mut data| {
+                    data.migrate();
                     data.sync_groups();
                     data
                 })

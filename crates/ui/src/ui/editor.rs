@@ -3,7 +3,7 @@
 use eframe::egui::{self, RichText};
 
 use dbpadu_core::{
-    model::{Connection, DbKind, SshAuth, group_label},
+    model::{Connection, DbKind, Driver, SshAuth, group_label},
     secrets::{Secret, Secrets},
 };
 
@@ -12,8 +12,8 @@ use crate::{
     theme::Theme,
 };
 
-/// Width of the list of database types at the left of the form.
-const KINDS_WIDTH: f32 = 170.0;
+/// Width of the list of drivers at the left of the form.
+const KINDS_WIDTH: f32 = 190.0;
 const FORM_WIDTH: f32 = 540.0;
 /// The least height of the form, so the dialog does not jump between pages.
 const FORM_HEIGHT: f32 = 440.0;
@@ -96,64 +96,113 @@ enum Outcome {
     Save,
     Test,
     Delete,
+    /// Open the driver form on a new driver, on top of this form.
+    NewDriver,
 }
 
-/// One database type in the list at the left of the form.
-fn kind_row(ui: &mut egui::Ui, theme: &Theme, kind: DbKind, selected: bool) -> egui::Response {
+/// One driver in the list at the left of the form: its name, and under it
+/// its version.
+fn driver_row(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    name: &str,
+    version: &str,
+    selected: bool,
+) -> egui::Response {
     let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(KINDS_WIDTH, 36.0), egui::Sense::click());
-    let painter = ui.painter();
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), egui::Sense::click());
+    let painter = ui.painter().with_clip_rect(rect);
     if selected {
         painter.rect_filled(rect, 6.0, theme.accent);
     } else if response.hovered() {
         painter.rect_filled(rect, 6.0, theme.border.gamma_multiply(0.6));
     }
-    let badge = egui::Rect::from_center_size(
-        egui::pos2(rect.left() + 20.0, rect.center().y),
-        egui::vec2(24.0, 24.0),
-    );
-    painter.rect_filled(badge, 6.0, super::kind_color(kind));
+    let (text, dim) = if selected {
+        (theme.on_accent, theme.on_accent.gamma_multiply(0.8))
+    } else {
+        (theme.text, theme.text_dim)
+    };
     painter.text(
-        badge.center(),
-        egui::Align2::CENTER_CENTER,
-        kind.short(),
-        egui::FontId::proportional(10.5),
-        egui::Color32::WHITE,
-    );
-    painter.text(
-        egui::pos2(rect.left() + 40.0, rect.center().y),
+        egui::pos2(rect.left() + 10.0, rect.top() + 12.0),
         egui::Align2::LEFT_CENTER,
-        kind.label(),
+        name,
         egui::FontId::proportional(14.0),
-        if selected {
-            theme.on_accent
-        } else {
-            theme.text
-        },
+        text,
     );
-    response
+    painter.text(
+        egui::pos2(rect.left() + 10.0, rect.top() + 29.0),
+        egui::Align2::LEFT_CENTER,
+        version,
+        egui::FontId::proportional(11.0),
+        dim,
+    );
+    response.on_hover_text(format!("{name} · {version}"))
 }
 
-/// Name, package and version of the driver the connection will use.
-fn driver_box(app: &App, ui: &mut egui::Ui, kind: DbKind) {
+/// The list of drivers at the left of the form: the ones inside dbpadu,
+/// then the user's own. Returns the one that was clicked.
+fn driver_list(
+    app: &App,
+    ui: &mut egui::Ui,
+    draft: &Connection,
+    drivers: &[Driver],
+) -> Option<(DbKind, Option<Driver>)> {
     let theme = app.theme;
-    let (name, package, version, note) = if let Some(own) = app.own_driver(kind) {
-        let file = std::path::Path::new(own.jar.trim())
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| own.jar.clone());
-        let (class, version) = match app.driver_checks.get(&kind) {
-            Some(Load::Ready(info)) => (info.class_name.clone(), info.version.clone()),
-            Some(Load::Failed(_)) => ("could not be read".to_string(), String::new()),
-            _ => ("…".to_string(), String::new()),
+    let mut chosen = None;
+    egui::ScrollArea::vertical()
+        .id_salt("connection_drivers")
+        .max_height(FORM_HEIGHT - 30.0)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for kind in DbKind::ALL {
+                let version = match app.bundled_driver(kind) {
+                    Some(driver) => format!("built in · {}", driver.version),
+                    None => "built in".to_string(),
+                };
+                let selected = draft.kind == kind && draft.driver.is_none();
+                if driver_row(ui, &theme, kind.label(), &version, selected).clicked() && !selected {
+                    chosen = Some((kind, None));
+                }
+            }
+            if !drivers.is_empty() {
+                ui.add_space(6.0);
+                super::field_label(ui, &theme, "Your drivers");
+            }
+            for driver in drivers {
+                let version = match app.driver_version(driver) {
+                    version if version.is_empty() => driver.kind.label().to_string(),
+                    version => format!("{} · {version}", driver.kind.label()),
+                };
+                let selected = draft.driver == Some(driver.id);
+                if driver_row(ui, &theme, &driver.name, &version, selected).clicked() && !selected {
+                    chosen = Some((driver.kind, Some(driver.clone())));
+                }
+            }
+        });
+    chosen
+}
+
+/// Name, class and version of the driver the connection will use.
+fn driver_box(app: &App, ui: &mut egui::Ui, kind: DbKind, own: Option<&Driver>) {
+    let theme = app.theme;
+    let (name, package, version, note) = if let Some(own) = own {
+        let class = match app.driver_checks.get(&own.id) {
+            Some(Load::Ready(info)) => info.class_name.clone(),
+            Some(Load::Failed(_)) => "could not be read".to_string(),
+            _ => own.class_name.trim().to_string(),
         };
-        (file, class, version, "Your own driver, chosen in Settings")
+        (
+            own.name.clone(),
+            class,
+            app.driver_version(own),
+            "Your own driver. Change it on the Drivers page.",
+        )
     } else if let Some(driver) = app.bundled_driver(kind) {
         (
             driver.name.clone(),
             driver.package.clone(),
             driver.version.clone(),
-            "Inside dbpadu. Choose another in Settings.",
+            "Inside dbpadu. For another version, add a driver of your own.",
         )
     } else {
         (
@@ -163,6 +212,7 @@ fn driver_box(app: &App, ui: &mut egui::Ui, kind: DbKind) {
             "Shown when the engine is running",
         )
     };
+    let second = if own.is_some() { "Class" } else { "Package" };
     egui::Frame::new()
         .fill(theme.surface)
         .stroke(egui::Stroke::new(1.0, theme.border))
@@ -174,7 +224,7 @@ fn driver_box(app: &App, ui: &mut egui::Ui, kind: DbKind) {
                 ui.spacing_mut().item_spacing = egui::vec2(22.0, 4.0);
                 for (label, value) in [
                     ("JDBC driver", name),
-                    ("Package", package),
+                    (second, package),
                     ("Version", version),
                 ] {
                     ui.vertical(|ui| {
@@ -219,6 +269,7 @@ fn main_page(
     editor: &mut ConnectionEditor,
     groups: &[String],
     can_save: bool,
+    with_host: bool,
 ) {
     let draft = &mut editor.draft;
     ui.horizontal(|ui| {
@@ -278,16 +329,20 @@ fn main_page(
         });
         return;
     }
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.set_width(410.0);
-            super::field(ui, theme, "Host", &mut draft.host, "localhost");
+    // A driver whose address has no host, such as one for a database in a
+    // file, is not asked for one.
+    if with_host {
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(410.0);
+                super::field(ui, theme, "Host", &mut draft.host, "localhost");
+            });
+            ui.vertical(|ui| {
+                super::field_label(ui, theme, "Port");
+                port_field(ui, &mut editor.port, &mut draft.port);
+            });
         });
-        ui.vertical(|ui| {
-            super::field_label(ui, theme, "Port");
-            port_field(ui, &mut editor.port, &mut draft.port);
-        });
-    });
+    }
     super::field(
         ui,
         theme,
@@ -395,7 +450,7 @@ fn ssh_page(ui: &mut egui::Ui, theme: &Theme, editor: &mut ConnectionEditor, can
     );
 }
 
-fn advanced_page(ui: &mut egui::Ui, theme: &Theme, draft: &mut Connection) {
+fn advanced_page(ui: &mut egui::Ui, theme: &Theme, draft: &mut Connection, own: Option<&Driver>) {
     super::field(
         ui,
         theme,
@@ -406,10 +461,10 @@ fn advanced_page(ui: &mut egui::Ui, theme: &Theme, draft: &mut Connection) {
     super::field_label(ui, theme, "Address the engine connects to");
     let url = if draft.uses_ssh() {
         draft
-            .jdbc_url_through_tunnel()
+            .jdbc_url_through_tunnel(own)
             .replace(dbpadu_core::model::TUNNEL_PORT, "<tunnel port>")
     } else {
-        draft.jdbc_url()
+        draft.jdbc_url(own)
     };
     ui.add(
         egui::Label::new(
@@ -420,6 +475,26 @@ fn advanced_page(ui: &mut egui::Ui, theme: &Theme, draft: &mut Connection) {
         )
         .wrap(),
     );
+    if let Some(own) = own {
+        let properties = own.set_properties();
+        if !properties.is_empty() {
+            super::field_label(ui, theme, "Connection properties of the driver");
+            let text = properties
+                .iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect::<Vec<_>>()
+                .join("  ·  ");
+            ui.add(
+                egui::Label::new(
+                    RichText::new(text)
+                        .monospace()
+                        .size(12.0)
+                        .color(theme.text_dim),
+                )
+                .wrap(),
+            );
+        }
+    }
 }
 
 pub fn show(app: &mut App, ctx: &egui::Context) {
@@ -434,6 +509,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         .iter()
         .map(|group| group.path.clone())
         .collect();
+    let drivers = app.data.drivers.clone();
     let mut outcome = Outcome::Keep;
 
     let modal = egui::Modal::new(egui::Id::unique("connection_editor"))
@@ -451,28 +527,48 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             ui.add_space(4.0);
 
             ui.horizontal_top(|ui| {
-                // At the left: the database types, one under the other.
+                // The user's own driver of the connection, if it has one.
+                let own = editor
+                    .draft
+                    .driver
+                    .and_then(|id| drivers.iter().find(|driver| driver.id == id))
+                    .cloned();
+                // At the left: the drivers, one under the other.
                 ui.vertical(|ui| {
                     ui.set_width(KINDS_WIDTH);
-                    super::field_label(ui, &theme, "Database type");
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    for kind in DbKind::ALL {
-                        let selected = editor.draft.kind == kind;
-                        if kind_row(ui, &theme, kind, selected).clicked() && !selected {
-                            editor.draft.set_kind(kind);
-                            editor.port = editor.draft.port.to_string();
-                            editor.test = None;
-                            if kind.is_file() && editor.page == Page::Ssh {
-                                editor.page = Page::Main;
-                            }
+                    super::field_label(ui, &theme, "Database driver");
+                    if let Some((kind, driver)) = driver_list(app, ui, &editor.draft, &drivers) {
+                        editor.draft.set_driver(own.as_ref(), kind, driver.as_ref());
+                        editor.port = editor.draft.port.to_string();
+                        editor.test = None;
+                        if kind.is_file() && editor.page == Page::Ssh {
+                            editor.page = Page::Main;
                         }
                     }
+                    ui.add_space(4.0);
+                    if ui
+                        .button("New driver…")
+                        .on_hover_text(
+                            "Add a JDBC driver of your own: another version, such as MySQL 5, \
+                             or another database.",
+                        )
+                        .clicked()
+                    {
+                        outcome = Outcome::NewDriver;
+                    }
                 });
+                // The click above may have changed it.
+                let own = editor
+                    .draft
+                    .driver
+                    .and_then(|id| drivers.iter().find(|driver| driver.id == id))
+                    .cloned();
+                let own = own.as_ref();
                 ui.add_space(10.0);
                 ui.vertical(|ui| {
                     ui.set_width(FORM_WIDTH);
                     ui.set_min_height(FORM_HEIGHT);
-                    driver_box(app, ui, editor.draft.kind);
+                    driver_box(app, ui, editor.draft.kind, own);
                     ui.horizontal(|ui| {
                         ui.selectable_value(&mut editor.page, Page::Main, "Main");
                         if !editor.draft.kind.is_file() {
@@ -485,12 +581,22 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         }
                         ui.selectable_value(&mut editor.page, Page::Advanced, "Advanced");
                     });
+                    let with_host = own.is_none_or(|driver| {
+                        ["{host}", "{server}", "{port}"]
+                            .iter()
+                            .any(|name| driver.url_template.contains(name))
+                    });
                     match editor.page {
-                        Page::Main => {
-                            main_page(ui, &theme, &mut editor, &groups, can_save_passwords)
-                        }
+                        Page::Main => main_page(
+                            ui,
+                            &theme,
+                            &mut editor,
+                            &groups,
+                            can_save_passwords,
+                            with_host,
+                        ),
                         Page::Ssh => ssh_page(ui, &theme, &mut editor, can_save_passwords),
-                        Page::Advanced => advanced_page(ui, &theme, &mut editor.draft),
+                        Page::Advanced => advanced_page(ui, &theme, &mut editor.draft, own),
                     }
 
                     if editor.testing {
@@ -505,13 +611,13 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         };
                         ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
                     }
-                    if let Some(problem) = editor.draft.problem() {
+                    if let Some(problem) = editor.draft.problem(own) {
                         ui.label(RichText::new(problem).small().color(theme.text_dim));
                     }
                 });
             });
 
-            let problem = editor.draft.problem();
+            let problem = editor.draft.problem(app.data.driver_of(&editor.draft));
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if ui
@@ -555,6 +661,10 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     match outcome {
         Outcome::Keep => app.editor = Some(editor),
         Outcome::Close => {}
+        Outcome::NewDriver => {
+            app.driver_editor = Some(super::drivers::DriverEditor::new(editor.draft.kind));
+            app.editor = Some(editor);
+        }
         Outcome::Test => {
             let draft = editor.draft.clone();
             let (password, ssh_secret) = (editor.password.clone(), editor.ssh_secret.clone());

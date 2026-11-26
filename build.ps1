@@ -10,9 +10,18 @@
         (Maven is downloaded by engine\mvnw.cmd)
 
     The script installs Rust's GNU toolchain through rustup when it is
-    missing, builds the Java engine and a release of the program, packages
-    both as a .zip in dist\, and copies dbpadu.exe and dbpadu-engine.jar to
-    the folder this script is in. The two files stay together.
+    missing, builds the Java engine and a release of the program, and puts
+    everything in dist\, where the files stay together:
+
+      dbpadu.exe            the program, which only opens the window
+      dbpadu_ui.dll, dbpadu_engine.dll, dbpadu_core.dll
+                            the app's own libraries
+      std-....dll           Rust's standard library, shared by the three,
+                            with libgcc_s_seh-1.dll and libwinpthread-1.dll
+      dbpadu-engine.jar     the Java query engine, one file
+
+    dist\dbpadu.exe can be run straight away. The same files are packed in
+    a .zip next to them.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\build.ps1
@@ -137,19 +146,42 @@ if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -F
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
-$exe = "target\$Target\release\$App.exe"
-Copy-Item -LiteralPath $exe, $engineJar, 'README.md' -Destination $stage
-# Also put the program and the engine next to this script, so they can be
-# run straight away. Windows locks a running .exe and the jar its engine
-# has open, so this fails while dbpadu is open.
-try {
-    Copy-Item -LiteralPath $exe -Destination (Join-Path $PSScriptRoot "$App.exe") -Force
-    Copy-Item -LiteralPath $engineJar -Destination (Join-Path $PSScriptRoot $Jar) -Force
-} catch {
-    Fail "could not replace $App.exe or $Jar in $PSScriptRoot. Close dbpadu and run this script again."
+$release = "target\$Target\release"
+$files = @("$release\$App.exe") + @(Get-ChildItem -Path "$release\${App}_*.dll" | ForEach-Object { $_.FullName })
+if ($files.Count -lt 4) { Fail "the app's libraries (${App}_*.dll) were not built in $release" }
+
+# Rust's standard library as a DLL: the app's libraries share this one copy.
+$libDir = (& rustc "+$Toolchain" --print target-libdir --target $Target | Out-String).Trim()
+$std = Get-ChildItem -Path (Join-Path $libDir 'std-*.dll') | Select-Object -First 1
+if (-not $std) { Fail "Rust's shared standard library (std-*.dll) was not found in $libDir" }
+$files += $std.FullName
+
+# It needs these two from MinGW-w64. Rust's GNU toolchain carries them; gcc
+# has them too.
+$sysroot = (& rustc "+$Toolchain" --print sysroot | Out-String).Trim()
+$gccDir = Split-Path -Parent (Get-Command gcc).Source
+foreach ($dll in 'libgcc_s_seh-1.dll', 'libwinpthread-1.dll') {
+    $found = @((Join-Path $sysroot 'bin'), $libDir, $gccDir) |
+        ForEach-Object { Join-Path $_ $dll } |
+        Where-Object { Test-Path -LiteralPath $_ } |
+        Select-Object -First 1
+    if (-not $found) { Fail "$dll was not found in the Rust toolchain or next to gcc" }
+    $files += $found
 }
+$files += $engineJar
+
+Copy-Item -LiteralPath ($files + 'README.md') -Destination $stage
 Compress-Archive -LiteralPath $stage -DestinationPath $zip
 Remove-Item -LiteralPath $stage -Recurse -Force
 
+# The same files in dist\ itself, ready to run. Windows locks a running
+# .exe, its DLLs and the jar its engine has open, so this fails while
+# dbpadu is open.
+try {
+    Copy-Item -LiteralPath $files -Destination $dist -Force
+} catch {
+    Fail "could not replace the files in $dist. Close dbpadu and run this script again."
+}
+
 Write-Host "Built $zip" -ForegroundColor Green
-Write-Host "Copied $App.exe and $Jar to $PSScriptRoot. Keep the two files together; Java 17 or newer must be installed to run it."
+Write-Host "The same files are in $dist; run $dist\$App.exe. Keep the files together; Java 17 or newer must be installed to run it."
