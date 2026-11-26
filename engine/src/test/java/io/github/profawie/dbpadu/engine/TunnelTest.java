@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.sshd.common.session.Session;
 import org.apache.sshd.common.util.net.SshdSocketAddress;
+import org.apache.sshd.mina.MinaServiceFactoryFactory;
 import org.apache.sshd.server.SshServer;
 import org.apache.sshd.server.forward.AcceptAllForwardingFilter;
 import org.apache.sshd.server.keyprovider.SimpleGeneratorHostKeyProvider;
@@ -59,7 +60,7 @@ class TunnelTest {
     @AfterEach
     void stop() throws IOException {
         for (SshServer server : servers) {
-            server.stop(true);
+            server.stop();
         }
         database.close();
     }
@@ -67,6 +68,9 @@ class TunnelTest {
     /** An SSH server for `user` with `password`; counts what it forwards. */
     private int server(String user, String password, AtomicInteger forwards, boolean allow) throws IOException {
         SshServer server = SshServer.setUpDefaultServer();
+        // Not the default transport (NIO2): on Windows that one prints
+        // "Executor has been shut down" errors whenever a server stops.
+        server.setIoServiceFactoryFactory(new MinaServiceFactoryFactory());
         server.setHost("127.0.0.1");
         server.setPort(0);
         server.setKeyPairProvider(
