@@ -306,15 +306,13 @@ fn groups(
     }
 }
 
-/// The connections filed right under `group`.
+/// The connections filed right under `group`, in the order of their cards.
 fn connections(app: &App, ui: &mut egui::Ui, group: &str, depth: usize, actions: &mut Vec<Action>) {
-    let mut inside: Vec<&Connection> = app
+    let inside = app
         .data
         .connections
         .iter()
-        .filter(|connection| connection.group == group)
-        .collect();
-    inside.sort_by_key(|connection| connection.display_name().to_lowercase());
+        .filter(|connection| connection.group == group);
     for connection in inside {
         connection_node(app, ui, connection, depth, actions);
     }

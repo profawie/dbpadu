@@ -11,6 +11,9 @@ use super::editor::{ConnectionEditor, dialog_frame};
 use crate::app::{App, Link, LinkState};
 
 const CARD_INNER_WIDTH: f32 = 250.0;
+const CARD_PADDING: f32 = 14.0;
+/// The space between two cards.
+const CARD_GAP: f32 = 14.0;
 /// How far what is inside a group is moved to the right.
 const INDENT: f32 = 22.0;
 
@@ -27,6 +30,73 @@ enum Action {
     DeleteGroup(String),
     /// `None` takes the color of the group it is inside.
     ColorGroup(String, Option<String>),
+    /// Put the card in the group, in front of the card named, or last.
+    Move(Uuid, String, Option<Uuid>),
+}
+
+/// A connection card being dragged to another place.
+#[derive(Clone, Copy)]
+struct DraggedCard {
+    id: Uuid,
+    grab: super::Grab,
+}
+
+/// Where the dragged card would land if let go now.
+enum Landing {
+    /// Where it lies already.
+    Here,
+    /// In the group, in front of the card named, or after its last card.
+    At { group: String, before: Option<Uuid> },
+}
+
+/// The drag of a card, while the page is drawn.
+struct Drag {
+    card: Option<DraggedCard>,
+    /// The group the dragged card is in.
+    from: String,
+    pointer: Option<egui::Pos2>,
+    landing: Option<Landing>,
+}
+
+impl Drag {
+    /// Whether the pointer is in `rect`, in the part of it that shows.
+    fn over(&self, ui: &egui::Ui, rect: egui::Rect) -> bool {
+        self.card.is_some()
+            && self
+                .pointer
+                .is_some_and(|pointer| rect.contains(pointer) && ui.clip_rect().contains(pointer))
+    }
+
+    /// Mark what was drawn from `top` to here as a place to drop the card:
+    /// it goes to the end of `group`. Not for the group it is in.
+    fn zone(
+        &mut self,
+        ui: &egui::Ui,
+        theme: &crate::theme::Theme,
+        top: f32,
+        depth: usize,
+        group: &str,
+    ) {
+        if self.card.is_none() || self.from == group {
+            return;
+        }
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(
+                ui.max_rect().left() + depth as f32 * INDENT - 6.0,
+                top - 3.0,
+            ),
+            egui::pos2(ui.max_rect().right(), ui.cursor().top() - 5.0),
+        );
+        let over = self.over(ui, rect);
+        super::drop_outline(ui, theme, rect, over);
+        // A card under the pointer has the say on where it lands.
+        if over && self.landing.is_none() {
+            self.landing = Some(Landing::At {
+                group: group.to_string(),
+                before: None,
+            });
+        }
+    }
 }
 
 /// The box that names a new group or renames one.
@@ -48,7 +118,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 ui,
                 &theme,
                 "Connections",
-                "One card for each database. Click Connect to start working.",
+                "One card for each database. Click Connect to start working. Drag a card to move it.",
             );
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -80,6 +150,18 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         empty(app, ui);
     } else {
         let needle = app.search.trim().to_lowercase();
+        let card = egui::DragAndDrop::payload::<DraggedCard>(ui.ctx())
+            .map(|card| *card)
+            .filter(|card| app.data.connection(card.id).is_some());
+        let mut drag = Drag {
+            from: card
+                .and_then(|card| app.data.connection(card.id))
+                .map(|connection| connection.group.clone())
+                .unwrap_or_default(),
+            card,
+            pointer: ui.ctx().pointer_latest_pos(),
+            landing: None,
+        };
         egui::ScrollArea::vertical()
             .id_salt("home_scroll")
             .auto_shrink([false, false])
@@ -95,16 +177,32 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     );
                     return;
                 }
-                groups(app, ui, None, 0, &needle, &mut actions);
+                // Room for the outline of the first group while a card is dragged.
+                ui.add_space(4.0);
+                groups(app, ui, None, 0, &needle, &mut drag, &mut actions);
                 let loose = cards_of(app, "", &needle);
+                let top = ui.cursor().top();
                 if !loose.is_empty() {
                     if !app.data.groups.is_empty() {
                         ui.add_space(6.0);
                         ui.label(RichText::new("Without a group").color(theme.text_dim));
                     }
-                    cards(app, ui, &loose, 0, &mut actions);
+                    cards(app, ui, &loose, 0, &mut drag, &mut actions);
+                } else if drag.card.is_some() && !drag.from.is_empty() {
+                    // With every connection in a group there is nothing
+                    // to drop on to take one out, so offer a place.
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Without a group").color(theme.text_dim));
+                    ui.label(
+                        RichText::new("Drop here to take the connection out of its group.")
+                            .small()
+                            .color(theme.text_dim),
+                    );
+                    ui.add_space(8.0);
                 }
+                drag.zone(ui, &theme, top, 0, "");
             });
+        dragged(app, ui, drag, &mut actions);
     }
 
     for action in actions {
@@ -142,6 +240,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 app.data.delete_group(&path);
                 app.save();
             }
+            Action::Move(id, group, before) => {
+                if app.data.move_connection(id, &group, before) {
+                    // Show where it went.
+                    if let Some(group) = app.data.group_mut(&group) {
+                        group.collapsed = false;
+                    }
+                    app.save();
+                }
+            }
             Action::ColorGroup(path, color) => {
                 if let Some(group) = app.data.group_mut(&path) {
                     group.color = color;
@@ -161,16 +268,56 @@ fn matches(connection: &Connection, needle: &str) -> bool {
             .contains(needle)
 }
 
-/// The connections filed right under `group` that the search lets through.
+/// The dragged card under the pointer with what dropping it here does,
+/// and the drop itself.
+fn dragged(app: &App, ui: &egui::Ui, drag: Drag, actions: &mut Vec<Action>) {
+    let Some(card) = drag.card else {
+        return;
+    };
+    let Some(connection) = app.data.connection(card.id) else {
+        return;
+    };
+    let (hint, ok) = match &drag.landing {
+        Some(Landing::Here) => ("It is already here".to_string(), false),
+        Some(Landing::At { group, .. }) if *group == drag.from => {
+            ("Drop to put it here".to_string(), true)
+        }
+        Some(Landing::At { group, .. }) if group.is_empty() => {
+            ("Move out of its group".to_string(), true)
+        }
+        Some(Landing::At { group, .. }) => (format!("Move to {}", group_label(group)), true),
+        None => ("Drop on a card or a group".to_string(), false),
+    };
+    // Nothing in the copy can be clicked, so what it asks for is dropped.
+    let mut ignored = Vec::new();
+    super::drag_float(
+        ui.ctx(),
+        &app.theme,
+        card.grab,
+        CARD_PADDING,
+        &hint,
+        ok,
+        |ui| {
+            // As between the lines of the card where it lies.
+            ui.spacing_mut().item_spacing = egui::Vec2::splat(CARD_GAP);
+            card_body(ui, app, connection, &mut ignored);
+        },
+    );
+    if ui.input(|input| input.pointer.any_released())
+        && let Some(Landing::At { group, before }) = drag.landing
+    {
+        actions.push(Action::Move(card.id, group, before));
+    }
+}
+
+/// The connections filed right under `group` that the search lets
+/// through, in the order the user gave them.
 fn cards_of<'a>(app: &'a App, group: &str, needle: &str) -> Vec<&'a Connection> {
-    let mut shown: Vec<&Connection> = app
-        .data
+    app.data
         .connections
         .iter()
         .filter(|connection| connection.group == group && matches(connection, needle))
-        .collect();
-    shown.sort_by_key(|connection| connection.display_name().to_lowercase());
-    shown
+        .collect()
 }
 
 fn cards(
@@ -178,15 +325,54 @@ fn cards(
     ui: &mut egui::Ui,
     shown: &[&Connection],
     depth: usize,
+    drag: &mut Drag,
     actions: &mut Vec<Action>,
 ) {
     ui.horizontal(|ui| {
         ui.add_space(depth as f32 * INDENT);
         ui.vertical(|ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(14.0, 14.0);
-                for connection in shown {
-                    card(ui, app, connection, actions);
+                ui.spacing_mut().item_spacing = egui::Vec2::splat(CARD_GAP);
+                for (index, connection) in shown.iter().enumerate() {
+                    let lifted = drag.card.is_some_and(|card| card.id == connection.id);
+                    let rect = card(ui, app, connection, lifted, actions);
+                    if !drag.over(ui, rect.expand(CARD_GAP / 2.0)) {
+                        continue;
+                    }
+                    if lifted {
+                        drag.landing = Some(Landing::Here);
+                        continue;
+                    }
+                    // The half of the card the pointer is over says on
+                    // which side of it the dragged card lands.
+                    let after = drag
+                        .pointer
+                        .is_some_and(|pointer| pointer.x > rect.center().x);
+                    let neighbor = if after {
+                        shown.get(index + 1)
+                    } else {
+                        index.checked_sub(1).and_then(|index| shown.get(index))
+                    };
+                    let dragged_id = drag.card.map(|card| card.id);
+                    if neighbor.map(|neighbor| neighbor.id) == dragged_id && dragged_id.is_some() {
+                        // Right next to where it lies: nothing would change.
+                        drag.landing = Some(Landing::Here);
+                        continue;
+                    }
+                    let x = if after {
+                        rect.right() + CARD_GAP / 2.0
+                    } else {
+                        rect.left() - CARD_GAP / 2.0
+                    };
+                    super::drop_bar(ui, &app.theme, x, rect.y_range());
+                    drag.landing = Some(Landing::At {
+                        group: connection.group.clone(),
+                        before: if after {
+                            shown.get(index + 1).map(|next| next.id)
+                        } else {
+                            Some(connection.id)
+                        },
+                    });
                 }
             });
         });
@@ -202,6 +388,7 @@ fn groups(
     parent: Option<&str>,
     depth: usize,
     needle: &str,
+    drag: &mut Drag,
     actions: &mut Vec<Action>,
 ) {
     let theme = app.theme;
@@ -221,13 +408,16 @@ fn groups(
         }
         // While searching, what was found is shown even in a closed group.
         let open = !group.collapsed || !needle.is_empty();
+        let top = ui.cursor().top();
         group_header(app, ui, group, depth, open, inside, actions);
         if !open {
+            ui.add_space(2.0);
+            drag.zone(ui, &theme, top, depth, &group.path);
             continue;
         }
         let shown = cards_of(app, &group.path, needle);
         if !shown.is_empty() {
-            cards(app, ui, &shown, depth + 1, actions);
+            cards(app, ui, &shown, depth + 1, drag, actions);
         } else if inside == 0 {
             ui.horizontal(|ui| {
                 ui.add_space((depth + 1) as f32 * INDENT);
@@ -238,7 +428,9 @@ fn groups(
                 );
             });
         }
-        groups(app, ui, Some(&group.path), depth + 1, needle, actions);
+        // The groups inside are places of their own.
+        drag.zone(ui, &theme, top, depth, &group.path);
+        groups(app, ui, Some(&group.path), depth + 1, needle, drag, actions);
     }
 }
 
@@ -463,15 +655,67 @@ fn empty(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
-fn card(ui: &mut egui::Ui, app: &App, connection: &Connection, actions: &mut Vec<Action>) {
+/// Draws a connection's card and returns the space it took. The card can
+/// be picked up anywhere but on its buttons. `lifted` leaves only a faint
+/// copy, while the card is carried around.
+fn card(
+    ui: &mut egui::Ui,
+    app: &App,
+    connection: &Connection,
+    lifted: bool,
+    actions: &mut Vec<Action>,
+) -> egui::Rect {
+    let theme = app.theme;
+    let drag_id = egui::Id::unique(("card_drag", connection.id));
+    if let Some(grab) = super::drag_area(ui, drag_id) {
+        egui::DragAndDrop::set_payload(
+            ui.ctx(),
+            DraggedCard {
+                id: connection.id,
+                grab,
+            },
+        );
+    }
+    let mut frame = super::card(&theme).inner_margin(egui::Margin::same(CARD_PADDING as i8));
+    if app.links.get(&connection.id).is_some_and(Link::connected) {
+        frame = frame.stroke(egui::Stroke::new(1.5, theme.ok));
+    }
+    let rect = ui
+        .scope(|ui| {
+            if lifted {
+                ui.set_opacity(super::DRAGGED_OPACITY);
+            }
+            let rect = frame
+                .show(ui, |ui| card_body(ui, app, connection, actions))
+                .response
+                .rect;
+            // The color of the group, as a bar down the left edge of the card.
+            if let Some(color) = app
+                .data
+                .group_color(&connection.group)
+                .and_then(super::hex_color)
+            {
+                let bar = egui::Rect::from_min_max(
+                    rect.left_top() + egui::vec2(1.0, 8.0),
+                    egui::pos2(rect.left() + 5.0, rect.bottom() - 8.0),
+                );
+                ui.painter().rect_filled(bar, 2.0, color);
+            }
+            rect
+        })
+        .inner;
+    super::drag_area_drawn(ui, drag_id, rect);
+    rect
+}
+
+/// The inside of a connection's card.
+fn card_body(ui: &mut egui::Ui, app: &App, connection: &Connection, actions: &mut Vec<Action>) {
     let theme = app.theme;
     let id = connection.id;
     let link = app.links.get(&id);
-    let mut frame = super::card(&theme);
-    if link.is_some_and(Link::connected) {
-        frame = frame.stroke(egui::Stroke::new(1.5, theme.ok));
-    }
-    let shown = frame.show(ui, |ui| {
+    // Dragging over the text moves the card instead of selecting it.
+    ui.style_mut().interaction.selectable_labels = false;
+    {
         ui.set_width(CARD_INNER_WIDTH);
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
@@ -563,18 +807,5 @@ fn card(ui: &mut egui::Ui, app: &App, connection: &Connection, actions: &mut Vec
                 }
             }
         });
-    });
-    // The color of the group, as a bar down the left edge of the card.
-    if let Some(color) = app
-        .data
-        .group_color(&connection.group)
-        .and_then(super::hex_color)
-    {
-        let rect = shown.response.rect;
-        let bar = egui::Rect::from_min_max(
-            rect.left_top() + egui::vec2(1.0, 8.0),
-            egui::pos2(rect.left() + 5.0, rect.bottom() - 8.0),
-        );
-        ui.painter().rect_filled(bar, 2.0, color);
     }
 }
