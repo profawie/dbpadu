@@ -30,7 +30,42 @@ final class LimitGuard {
     /** A word outside strings, comments and brackets. */
     private record Word(String text, int start, int end) {}
 
-    private record Scan(List<Word> words, int codeEnd, boolean startsWithBracket) {}
+    /**
+     * @param changesData a word that changes data stands somewhere in the
+     *     SQL, also inside brackets
+     */
+    private record Scan(
+        List<Word> words, int codeEnd, boolean startsWithBracket, boolean changesData) {}
+
+    /**
+     * The SQL to run for an export of every row: the SQL itself, without a
+     * closing {@code ;}. {@code null} when it is not a plain SELECT, because
+     * an export runs the SQL a second time and must not change data again.
+     */
+    static String forExport(String sql, String kind) {
+        Scan scan = scan(sql, "sqlserver".equals(kind));
+        List<Word> words = scan.words();
+        if (scan.changesData()) {
+            return null;
+        }
+        if (!scan.startsWithBracket()) {
+            if (words.isEmpty()) {
+                return null;
+            }
+            String first = words.get(0).text();
+            if (!first.equals("SELECT") && !first.equals("WITH")) {
+                return null;
+            }
+        }
+        for (Word word : words) {
+            // SELECT ... INTO makes a table.
+            if (word.text().equals("INTO")) {
+                return null;
+            }
+        }
+        String body = sql.substring(0, scan.codeEnd());
+        return body.isBlank() ? null : body;
+    }
 
     static Guarded apply(String sql, String kind, int limit) {
         Scan scan = scan(sql, "sqlserver".equals(kind));
@@ -118,6 +153,7 @@ final class LimitGuard {
         int codeEnd = 0;
         boolean sawCode = false;
         boolean startsWithBracket = false;
+        boolean changesData = false;
         int length = sql.length();
         int i = 0;
         while (i < length) {
@@ -157,8 +193,14 @@ final class LimitGuard {
                 while (i < length && (Character.isLetterOrDigit(sql.charAt(i)) || sql.charAt(i) == '_')) {
                     i++;
                 }
+                String word = sql.substring(start, i).toUpperCase(Locale.ROOT);
                 if (depth == 0) {
-                    words.add(new Word(sql.substring(start, i).toUpperCase(Locale.ROOT), start, i));
+                    words.add(new Word(word, start, i));
+                }
+                switch (word) {
+                    case "INSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE", "DROP", "ALTER",
+                        "CREATE", "CALL", "EXEC", "EXECUTE" -> changesData = true;
+                    default -> {}
                 }
                 codeEnd = i;
                 sawCode = true;
@@ -176,7 +218,7 @@ final class LimitGuard {
                 sawCode = true;
             }
         }
-        return new Scan(words, codeEnd, startsWithBracket);
+        return new Scan(words, codeEnd, startsWithBracket, changesData);
     }
 
     /** Index after the closing quote; a doubled quote stays inside. */

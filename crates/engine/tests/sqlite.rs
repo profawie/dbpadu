@@ -103,6 +103,49 @@ fn select_is_always_limited() {
     assert_eq!(rows.rows.len(), 10);
     assert_eq!(rows.added, None);
 
+    // An export runs the SELECT again without the limit, into a file:
+    // first the columns, then every row.
+    let rows_file = std::env::temp_dir().join(format!("dbpadu-test-{}.jsonl", std::process::id()));
+    let exported: protocol::Exported = protocol::read(
+        ask(
+            &mut engine,
+            protocol::export(
+                "s",
+                "select n, 'x' as word from t;",
+                &rows_file.to_string_lossy(),
+            ),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(exported.rows, 50);
+    let text = std::fs::read_to_string(&rows_file).unwrap();
+    let lines: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 51);
+    assert_eq!(lines[0]["columns"][0]["name"], "n");
+    assert_eq!(lines[0]["columns"][1]["name"], "word");
+    assert_eq!(lines[50], serde_json::json!(["49", "x"]));
+    let _ = std::fs::remove_file(&rows_file);
+
+    // Only a SELECT: an export is a second run, and must not change data.
+    let error = ask(
+        &mut engine,
+        protocol::export("s", "delete from t", &rows_file.to_string_lossy()),
+    )
+    .unwrap_err();
+    assert!(error.contains("Only a SELECT"), "{error}");
+    assert!(!rows_file.exists());
+    let error = ask(
+        &mut engine,
+        protocol::export("s", "select * from nowhere", &rows_file.to_string_lossy()),
+    )
+    .unwrap_err();
+    assert!(error.contains("nowhere"), "{error}");
+    assert!(!rows_file.exists());
+
     // Changes wait for a commit once auto-commit is off.
     let tx: TxAnswer =
         protocol::read(ask(&mut engine, protocol::auto_commit("s", false)).unwrap()).unwrap();

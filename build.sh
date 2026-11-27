@@ -8,9 +8,9 @@
 # Everything that is built ends up in dist/, and stays together:
 #
 #   dbpadu (dbpadu.exe)   the program, which only opens the window
-#   dbpadu_ui, dbpadu_engine, dbpadu_core
+#   dbpadu_ui, dbpadu_engine, dbpadu_export, dbpadu_core
 #                         the app's own libraries (.so, .dll or .dylib)
-#   std-...               Rust's standard library, shared by the three
+#   std-...               Rust's standard library, shared by all of them
 #   dbpadu-engine.jar     the Java query engine, one file
 #
 # dist/dbpadu can be run straight away. The same files are packed in a

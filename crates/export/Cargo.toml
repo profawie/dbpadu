@@ -1,0 +1,17 @@
+[package]
+name = "dbpadu-export"
+description = "Writes dbpadu's query results as CSV, SQL, JSON, Markdown, HTML, XML and text"
+publish = false
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# A shared library (dbpadu_export.dll, libdbpadu_export.so) next to the program.
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+dbpadu-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true

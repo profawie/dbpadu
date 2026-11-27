@@ -130,6 +130,16 @@ impl QueryResult {
     }
 }
 
+/// What an export of every row gave.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Exported {
+    /// Rows written to the file.
+    pub rows: u64,
+    pub elapsed_ms: u64,
+    pub tx: TxState,
+}
+
 /// The first level under a connection in the tree.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -311,6 +321,16 @@ pub fn execute(session: &str, sql: &str, limit: u32) -> Request {
     (
         "execute",
         json!({"session": session, "sql": sql, "limit": limit}),
+    )
+}
+
+/// Run a SELECT again as it is written, without the row limit, and write
+/// every row to `file`, one JSON value per line: first the columns, then
+/// the rows. The engine refuses anything that is not a plain SELECT.
+pub fn export(session: &str, sql: &str, file: &str) -> Request {
+    (
+        "export",
+        json!({"session": session, "sql": sql, "file": file}),
     )
 }
 

@@ -229,6 +229,7 @@ public final class Main {
         return switch (op) {
             case "execute" -> session.execute(
                 text(request, "sql"), request.has("limit") ? request.get("limit").getAsInt() : 0);
+            case "export" -> session.export(text(request, "sql"), text(request, "file"));
             case "autocommit" -> wrapTx(session.setAutoCommit(request.get("value").getAsBoolean()));
             case "commit" -> wrapTx(session.commit());
             case "rollback" -> wrapTx(session.rollback());
