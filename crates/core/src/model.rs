@@ -838,6 +838,9 @@ pub struct Data {
     /// The JDBC drivers the user added.
     pub drivers: Vec<Driver>,
     pub settings: Settings,
+    /// The connections are in the order the user gave their cards. A file
+    /// from before 0.3.1 does not say so: its cards were shown by name.
+    pub cards_ordered: bool,
 }
 
 impl Data {
@@ -904,6 +907,12 @@ impl Data {
     /// per kind of 0.1.1 becomes a driver in the list, and the connections
     /// of that kind use it, as they did.
     pub fn migrate(&mut self) {
+        if !self.cards_ordered {
+            // Up to 0.3.0 the cards were shown by name; start from that.
+            self.connections
+                .sort_by_cached_key(|connection| connection.display_name().to_lowercase());
+            self.cards_ordered = true;
+        }
         for (kind, own) in std::mem::take(&mut self.settings.drivers) {
             if own.jar.trim().is_empty() {
                 continue;
@@ -941,6 +950,38 @@ impl Data {
             None => self.connections.push(connection),
         }
         self.sync_groups();
+    }
+
+    /// Put a connection's card in `group`, in front of the card of `before`,
+    /// or after the last card of the group for `None`. Returns whether
+    /// anything changed.
+    pub fn move_connection(&mut self, id: Uuid, group: &str, before: Option<Uuid>) -> bool {
+        if before == Some(id) {
+            return false;
+        }
+        let Some(from) = self.connections.iter().position(|c| c.id == id) else {
+            return false;
+        };
+        let old = self.connections.clone();
+        let mut moved = self.connections.remove(from);
+        moved.group = clean_group(group);
+        let to = before
+            .and_then(|before| self.connections.iter().position(|c| c.id == before))
+            .or_else(|| {
+                // Right after the last card of the group, so the cards of a
+                // group stay together in the file too.
+                self.connections
+                    .iter()
+                    .rposition(|c| c.group == moved.group)
+                    .map(|last| last + 1)
+            })
+            .unwrap_or(self.connections.len());
+        self.connections.insert(to, moved);
+        if self.connections == old {
+            return false;
+        }
+        self.sync_groups();
+        true
     }
 
     pub fn remove(&mut self, id: Uuid) {
@@ -1153,6 +1194,69 @@ mod tests {
             });
         }
         data
+    }
+
+    fn names(data: &Data) -> Vec<&str> {
+        data.connections.iter().map(|c| c.name.as_str()).collect()
+    }
+
+    fn id_of(data: &Data, name: &str) -> Uuid {
+        data.connections.iter().find(|c| c.name == name).unwrap().id
+    }
+
+    #[test]
+    fn a_card_is_moved_in_front_of_another_or_to_the_end_of_a_group() {
+        let mut data = Data::default();
+        for (name, group) in [
+            ("a", ""),
+            ("b", ""),
+            ("c", ""),
+            ("p", "Prod"),
+            ("q", "Prod"),
+        ] {
+            data.upsert(Connection {
+                name: name.into(),
+                group: group.into(),
+                ..Connection::new(DbKind::Postgres)
+            });
+        }
+        let id = |data: &Data, name: &str| id_of(data, name);
+        // In front of another card of the same group.
+        assert!(data.move_connection(id(&data, "c"), "", Some(id(&data, "a"))));
+        assert_eq!(names(&data), ["c", "a", "b", "p", "q"]);
+        // To the end of its group.
+        assert!(data.move_connection(id(&data, "c"), "", None));
+        assert_eq!(names(&data), ["a", "b", "c", "p", "q"]);
+        // Into another group, in front of a card there.
+        assert!(data.move_connection(id(&data, "a"), "Prod", Some(id(&data, "q"))));
+        assert_eq!(names(&data), ["b", "c", "p", "a", "q"]);
+        assert_eq!(group_of(&data, "a"), "Prod");
+        // Into a group that has no cards yet.
+        assert!(data.move_connection(id(&data, "b"), "Prod / Asia", None));
+        assert_eq!(group_of(&data, "b"), "Prod/Asia");
+        assert!(data.groups.iter().any(|group| group.path == "Prod/Asia"));
+        // Where it already is: nothing changes.
+        assert!(!data.move_connection(id(&data, "a"), "Prod", Some(id(&data, "q"))));
+        assert!(!data.move_connection(id(&data, "q"), "Prod", None));
+        assert!(!data.move_connection(id(&data, "q"), "Prod", Some(id(&data, "q"))));
+        assert!(!data.move_connection(Uuid::new_v4(), "Prod", None));
+    }
+
+    #[test]
+    fn cards_of_an_older_file_start_in_the_order_they_were_shown() {
+        let mut data: Data = serde_json::from_str(
+            r#"{"connections":[{"name":"zeta"},{"name":"Alpha"},{"name":"beta"}]}"#,
+        )
+        .unwrap();
+        data.migrate();
+        assert_eq!(names(&data), ["Alpha", "beta", "zeta"]);
+        // From then on the order is the user's.
+        let zeta = id_of(&data, "zeta");
+        let alpha = id_of(&data, "Alpha");
+        data.move_connection(zeta, "", Some(alpha));
+        let mut again: Data = serde_json::from_str(&serde_json::to_string(&data).unwrap()).unwrap();
+        again.migrate();
+        assert_eq!(names(&again), ["zeta", "Alpha", "beta"]);
     }
 
     fn group_of<'a>(data: &'a Data, name: &str) -> &'a str {

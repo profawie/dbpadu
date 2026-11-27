@@ -4,7 +4,7 @@
 
 A friendly desktop database client. The app is written in Rust; the query engine is written in Java and talks to databases through JDBC. Runs on Windows, macOS and Linux.
 
-Version: 0.3.0
+Version: 0.3.1
 
 | Connections | A query |
 | --- | --- |
@@ -19,6 +19,7 @@ Version: 0.3.0
 | Feature | Status |
 | --- | --- |
 | One card for each connection, with search; Connect, New query, Edit and Disconnect on the card | Done |
+| Drag a card to put it before or after another, or onto a group to move it there; the card comes along under the pointer, and the order is saved | Done |
 | Groups and groups inside groups (for example Company1 › Production › prod1), each with a color that shows on its cards, in the tree and under its query tabs | Done |
 | Connection form in one step: pick the driver from the list at the left (name and version), fill in host, port, database, user and password; the port, user and driver settings are filled in for the driver; **Test connection** before saving | Done |
 | The form names the JDBC driver that will be used: name, package or class, and version | Done |
@@ -33,7 +34,7 @@ Version: 0.3.0
 | **A SELECT is always limited** (see [Row limit](#row-limit)) | Done |
 | SQL editor with colors; Run the statement at the cursor or the selected text (Ctrl+Enter or F5); Stop a running query | Done |
 | Format SQL (Ctrl+Shift+F) | Done |
-| Result grid with resizable columns, row numbers, NULL shown apart | Done |
+| Result grid with rows close together, column names in bold, resizable columns, row numbers, NULL shown apart | Done |
 | Select in the grid like in a spreadsheet and copy with Ctrl+C: a cell, a block of cells, whole rows, whole columns (see [Copy and export](#copy-and-export)) | Done |
 | Copy and export in 14 formats: TSV, CSV, semicolon- and pipe-separated, SQL INSERT (one row or many rows per statement), SQL UPDATE, WHERE clause, one line for `IN (…)`, JSON, XML, HTML, Markdown and a text table | Done |
 | Export every row of a query to a file, past the row limit, without holding the rows in memory | Done |

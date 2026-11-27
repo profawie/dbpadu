@@ -128,6 +128,174 @@ pub fn dot(ui: &mut egui::Ui, color: Color32) {
     ui.painter().circle_filled(rect.center(), 4.0, color);
 }
 
+/// A line of text in bold, cut off with … where there is no room for it.
+/// The app's font has no bold face, so the text is drawn twice, half a
+/// point apart.
+pub fn bold_label(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
+    const SHIFT: f32 = 0.5;
+    let galley = egui::WidgetText::from(text).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        ui.available_width() - SHIFT,
+        egui::TextStyle::Body,
+    );
+    let (rect, response) =
+        ui.allocate_exact_size(galley.size() + egui::vec2(SHIFT, 0.0), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        painter.galley_with_override_text_color(rect.min, galley.clone(), color);
+        painter.galley_with_override_text_color(rect.min + egui::vec2(SHIFT, 0.0), galley, color);
+    }
+    response
+}
+
+/// How a card was picked up, kept while it is dragged so its copy under
+/// the pointer stays where the hand took hold of it.
+#[derive(Debug, Clone, Copy)]
+pub struct Grab {
+    /// From the top left corner of the card to the pointer.
+    offset: egui::Vec2,
+    /// Size of the card where it lies.
+    size: egui::Vec2,
+    /// When it was picked up, in egui's clock.
+    at: f64,
+}
+
+/// Makes an area draggable without taking clicks away from the buttons
+/// drawn in it. Call this before drawing the area, then
+/// [`drag_area_drawn`] with the space it took. Returns how it was picked up
+/// in the frame a drag starts.
+///
+/// The drag has to be registered before the content so the content ends up
+/// on top of it; where the content was is remembered from the last frame.
+pub fn drag_area(ui: &mut egui::Ui, id: egui::Id) -> Option<Grab> {
+    let rect = ui.data(|data| data.get_temp::<egui::Rect>(id))?;
+    if !ui.interact(rect, id, egui::Sense::drag()).drag_started() {
+        return None;
+    }
+    let (pressed, at) = ui.input(|input| (input.pointer.press_origin(), input.time));
+    Some(Grab {
+        offset: pressed.unwrap_or(rect.center()) - rect.min,
+        size: rect.size(),
+        at,
+    })
+}
+
+pub fn drag_area_drawn(ui: &egui::Ui, id: egui::Id, rect: egui::Rect) {
+    ui.data_mut(|data| data.insert_temp(id, rect));
+}
+
+/// Seconds a card takes to rise off the page once it is picked up.
+const LIFT_TIME: f64 = 0.12;
+
+/// How much of a card stays visible where it lies while its copy is being
+/// dragged.
+pub const DRAGGED_OPACITY: f32 = 0.3;
+
+/// The dragged card itself, lifted off the page: it follows the pointer
+/// from the spot it was taken by, a little larger and with a shadow under
+/// it. `content` draws the card's inside, `padding` away from its edge, at
+/// the width it has where it lies.
+/// A line under the card says what dropping here does; `ok` is false when
+/// dropping here does nothing.
+pub fn drag_float(
+    ctx: &egui::Context,
+    theme: &Theme,
+    grab: Grab,
+    padding: f32,
+    hint: &str,
+    ok: bool,
+    content: impl FnOnce(&mut egui::Ui),
+) {
+    let Some(pointer) = ctx.pointer_latest_pos() else {
+        return;
+    };
+    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+    // 0 on the page, 1 fully lifted.
+    let lift = (((ctx.input(|input| input.time) - grab.at) / LIFT_TIME) as f32).clamp(0.0, 1.0);
+    if lift < 1.0 {
+        ctx.request_repaint();
+    }
+    let shadow = egui::Shadow {
+        offset: [0, (10.0 * lift) as i8],
+        blur: (28.0 * lift) as u8,
+        spread: 0,
+        color: Color32::from_black_alpha(if theme.dark { 150 } else { 70 }),
+    };
+    let area = egui::Area::new(egui::Id::unique("drag_float"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(pointer - grab.offset - egui::vec2(0.0, 3.0 * lift))
+        .interactable(false)
+        .show(ctx, |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+            card(theme)
+                .stroke(egui::Stroke::new(1.5, theme.accent_text))
+                .inner_margin(egui::Margin::same(padding as i8))
+                .shadow(shadow)
+                .show(ui, |ui| {
+                    ui.set_width(grab.size.x - 2.0 * padding);
+                    ui.set_min_height(grab.size.y - 2.0 * padding);
+                    content(ui);
+                });
+            let (fill, text) = if ok {
+                (theme.accent, theme.on_accent)
+            } else {
+                (theme.panel, theme.text_dim)
+            };
+            egui::Frame::new()
+                .fill(fill)
+                .corner_radius(egui::CornerRadius::same(10))
+                .inner_margin(egui::Margin::symmetric(10, 3))
+                .show(ui, |ui| {
+                    ui.add(egui::Label::new(RichText::new(hint).small().color(text)).extend());
+                });
+        });
+    // Grown around the pointer, so the spot it is held by does not move.
+    let scale = 1.0 + 0.03 * lift;
+    ctx.set_transform_layer(
+        area.response.layer_id,
+        egui::emath::TSTransform::from_translation(pointer.to_vec2())
+            * egui::emath::TSTransform::from_scaling(scale)
+            * egui::emath::TSTransform::from_translation(-pointer.to_vec2()),
+    );
+}
+
+/// Above the content, but cut off where the list it belongs to is.
+fn drop_painter(ui: &egui::Ui) -> egui::Painter {
+    ui.ctx()
+        .layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::unique("drop_marks"),
+        ))
+        .with_clip_rect(ui.clip_rect())
+}
+
+/// Outline of a place the dragged thing can be dropped on, brighter while
+/// the pointer is over it.
+pub fn drop_outline(ui: &egui::Ui, theme: &Theme, rect: egui::Rect, over: bool) {
+    let painter = drop_painter(ui);
+    if over {
+        painter.rect_filled(rect, 8.0, theme.accent_text.gamma_multiply(0.10));
+    }
+    let (width, color) = if over {
+        (2.0, theme.accent_text)
+    } else {
+        (1.0, theme.accent_text.gamma_multiply(0.5))
+    };
+    painter.rect_stroke(
+        rect,
+        8.0,
+        egui::Stroke::new(width, color),
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// A bar between two cards: the dragged card would land here.
+pub fn drop_bar(ui: &egui::Ui, theme: &Theme, x: f32, y: egui::Rangef) {
+    let rect = egui::Rect::from_x_y_ranges(x - 2.0..=x + 2.0, y);
+    drop_painter(ui).rect_filled(rect, 2.0, theme.accent_text);
+}
+
 /// SQL on one line: every run of spaces and line breaks becomes one space.
 pub fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")

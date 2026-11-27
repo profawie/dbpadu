@@ -15,7 +15,11 @@ use dbpadu_export::{Format, Group, Options};
 
 use crate::{app::QueryTab, theme::Theme};
 
-const ROW_HEIGHT: f32 = 24.0;
+/// Rows are close together, so many fit on the screen.
+const ROW_HEIGHT: f32 = 20.0;
+const HEADER_HEIGHT: f32 = 22.0;
+/// The space between two cells, across and down.
+const CELL_GAP: egui::Vec2 = egui::vec2(6.0, 1.0);
 /// Characters of a cell shown when the pointer rests on it.
 const HOVER_CHARS: usize = 2_000;
 /// How long "Copied …" stays above the grid.
@@ -379,6 +383,7 @@ pub fn show(
             // Text in the cells is not picked letter by letter: a click
             // selects the cell.
             ui.style_mut().interaction.selectable_labels = false;
+            ui.spacing_mut().item_spacing = CELL_GAP;
             let mut table = TableBuilder::new(ui)
                 // Each run starts with fresh column widths.
                 .id_salt(("grid", tab_id, runs))
@@ -395,7 +400,7 @@ pub fn show(
                 table = table.scroll_to_row(row, None);
             }
             table
-                .header(ROW_HEIGHT + 4.0, |mut header| {
+                .header(HEADER_HEIGHT, |mut header| {
                     let (_, response) = header.col(|ui| {
                         ui.label(RichText::new("#").small().color(theme.text_dim));
                     });
@@ -414,15 +419,12 @@ pub fn show(
                             block.contains(block.rows.0, index) && block.row_count() == row_count
                         });
                         let (_, response) = header.col(|ui| {
-                            let name = RichText::new(&column.name).strong();
-                            ui.add(
-                                egui::Label::new(if selected {
-                                    name.color(theme.accent_text)
-                                } else {
-                                    name
-                                })
-                                .truncate(),
-                            );
+                            let color = if selected {
+                                theme.accent_text
+                            } else {
+                                ui.visuals().strong_text_color()
+                            };
+                            super::bold_label(ui, &column.name, color);
                         });
                         let inside = pointer.is_some_and(|pointer| response.rect.contains(pointer));
                         point(

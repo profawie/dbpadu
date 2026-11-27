@@ -7,7 +7,7 @@
   <groupId>io.github.profawie</groupId>
   <artifactId>dbpadu-engine</artifactId>
   <!-- Keep the same as the version in the root Cargo.toml. -->
-  <version>0.3.0</version>
+  <version>0.3.1</version>
   <packaging>jar</packaging>
   <name>dbpadu engine</name>
   <description>The query engine of dbpadu: talks to databases through JDBC</description>

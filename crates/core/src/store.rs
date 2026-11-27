@@ -29,8 +29,14 @@ impl Store {
 
     /// Load the data. A file that does not exist yet yields empty data.
     pub fn load(&self) -> io::Result<Data> {
+        // Nothing saved yet: empty data of this version.
+        let fresh = || {
+            let mut data = Data::default();
+            data.migrate();
+            data
+        };
         let Some(path) = &self.path else {
-            return Ok(Data::default());
+            return Ok(fresh());
         };
         match fs::read_to_string(path) {
             Ok(text) => serde_json::from_str::<Data>(&text)
@@ -40,7 +46,7 @@ impl Store {
                     data
                 })
                 .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err)),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Data::default()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(fresh()),
             Err(err) => Err(err),
         }
     }
@@ -81,7 +87,11 @@ mod tests {
     #[test]
     fn missing_file_loads_as_empty() {
         let store = Store::at(temp_path("missing"));
-        assert_eq!(store.load().unwrap(), Data::default());
+        let fresh = Data {
+            cards_ordered: true,
+            ..Data::default()
+        };
+        assert_eq!(store.load().unwrap(), fresh);
     }
 
     #[test]
@@ -93,6 +103,7 @@ mod tests {
             ..Connection::new(DbKind::MariaDb)
         });
         data.settings.row_limit = 1_000;
+        data.cards_ordered = true;
         store.save(&data).unwrap();
         assert_eq!(store.load().unwrap(), data);
         fs::remove_dir_all(store.path().unwrap().parent().unwrap()).unwrap();
