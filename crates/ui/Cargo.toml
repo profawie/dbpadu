@@ -15,6 +15,7 @@ crate-type = ["dylib"]
 chrono.workspace = true
 dbpadu-core.workspace = true
 dbpadu-engine.workspace = true
+dbpadu-export.workspace = true
 eframe.workspace = true
 egui_extras.workspace = true
 rfd.workspace = true

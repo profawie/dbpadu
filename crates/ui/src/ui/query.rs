@@ -1,19 +1,16 @@
 //! A query tab: toolbar, SQL editor and the result under it.
 
 use eframe::egui::{self, RichText};
-use egui_extras::{Column, TableBuilder};
 
 use dbpadu_core::{model::ROW_LIMITS, sql};
 use dbpadu_engine::protocol::QueryResult;
+use dbpadu_export::Format;
 
+use super::grid;
 use crate::{
     app::{App, Link, LinkState, Outcome, QueryTab},
     theme::Theme,
 };
-
-const ROW_HEIGHT: f32 = 24.0;
-/// Characters of a cell shown when the pointer rests on it.
-const HOVER_CHARS: usize = 2_000;
 
 #[derive(Default)]
 struct Actions {
@@ -77,7 +74,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, tab_id: u64) {
                 .fill(theme.bg)
                 .inner_margin(egui::Margin::symmetric(12, 8)),
         )
-        .show(ui, |ui| result(ui, &theme, &app.tabs[index]));
+        .show(ui, |ui| {
+            let format = super::export::saved_format(&app.data.settings.copy_format);
+            let (changed, export) = result(ui, &theme, &mut app.tabs[index], format);
+            if let Some(format) = changed {
+                app.data.settings.copy_format = format.id().to_string();
+                app.save();
+            }
+            if export {
+                super::export::open(app, tab_id);
+            }
+        });
 
     if actions.format {
         let tab = &mut app.tabs[index];
@@ -125,9 +132,14 @@ fn toolbar(
                 actions.stop = true;
             }
             ui.spinner();
+            let seconds = running.since.elapsed().as_secs_f32();
             ui.label(
-                RichText::new(format!("{:.1} s", running.since.elapsed().as_secs_f32()))
-                    .color(theme.text_dim),
+                RichText::new(if running.exporting {
+                    format!("Exporting all rows… {seconds:.1} s")
+                } else {
+                    format!("{seconds:.1} s")
+                })
+                .color(theme.text_dim),
             );
         } else if connected {
             if ui
@@ -264,8 +276,19 @@ fn editor(ui: &mut egui::Ui, theme: &Theme, tab: &mut QueryTab) {
         });
 }
 
-fn result(ui: &mut egui::Ui, theme: &Theme, tab: &QueryTab) {
-    match &tab.outcome {
+/// The result of the tab. Returns the copy format, when it was changed,
+/// and whether the Export box was asked for.
+fn result(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    tab: &mut QueryTab,
+    mut format: Format,
+) -> (Option<Format>, bool) {
+    let before = format;
+    let mut export = false;
+    // The result is taken out while the grid changes the tab's selection.
+    let outcome = tab.outcome.take();
+    match &outcome {
         None => {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
@@ -291,122 +314,87 @@ fn result(ui: &mut egui::Ui, theme: &Theme, tab: &QueryTab) {
                 });
         }
         Some(Outcome::Result(result)) => {
-            headline(ui, theme, result);
-            if result.has_rows() {
-                grid(ui, theme, tab, result);
+            export = headline(ui, theme, tab, result, &mut format);
+            if result.has_rows()
+                && let Some(grid::Asked::Export) = grid::show(ui, theme, tab, result, format)
+            {
+                export = true;
             }
         }
     }
+    tab.outcome = outcome;
+    ((format != before).then_some(format), export)
 }
 
-/// The line above the grid: how much came back, and what limited it.
-fn headline(ui: &mut egui::Ui, theme: &Theme, result: &QueryResult) {
-    ui.horizontal_wrapped(|ui| {
+/// The line above the grid: how much came back and what limited it, and on
+/// the right what copies and exports it. Returns whether Export was clicked.
+fn headline(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    tab: &QueryTab,
+    result: &QueryResult,
+    format: &mut Format,
+) -> bool {
+    let mut export = false;
+    ui.horizontal(|ui| {
         ui.label(RichText::new(super::statusbar::summary(result)).strong());
-        if result.has_rows() {
-            if result.limit_reached {
-                ui.label(
-                    RichText::new(format!(
-                        "Stopped at the limit of {} rows. The table may have more.",
-                        result.limit
-                    ))
-                    .color(theme.warn),
-                );
+        if !result.has_rows() {
+            if !result.tx.auto_commit {
+                ui.label(RichText::new("Not committed yet.").color(theme.warn));
             }
-            if let Some(added) = &result.added {
-                ui.label(
-                    RichText::new(format!("dbpadu added {added} to your SQL."))
-                        .color(theme.text_dim),
-                );
-            }
-        } else if !result.tx.auto_commit {
-            ui.label(RichText::new("Not committed yet.").color(theme.warn));
+            return;
         }
-    });
-}
-
-fn grid(ui: &mut egui::Ui, theme: &Theme, tab: &QueryTab, result: &QueryResult) {
-    if result.columns.is_empty() {
-        return;
-    }
-    egui::ScrollArea::horizontal()
-        .id_salt(("grid_scroll", tab.id))
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            TableBuilder::new(ui)
-                // Each run starts with fresh column widths.
-                .id_salt(("grid", tab.id, tab.runs))
-                .striped(true)
-                .resizable(true)
-                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .column(Column::auto().at_least(36.0).resizable(false))
-                .columns(
-                    Column::initial(150.0).at_least(40.0).clip(true),
-                    result.columns.len(),
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let can_export = !result.rows.is_empty() && !result.columns.is_empty();
+            if ui
+                .add_enabled(can_export, egui::Button::new("Export…"))
+                .on_hover_text(
+                    "Save the result, or the selected cells, to a file:
+                     CSV, SQL, JSON, XML, HTML, Markdown and more",
                 )
-                .header(ROW_HEIGHT + 4.0, |mut header| {
-                    header.col(|ui| {
-                        ui.label(RichText::new("#").small().color(theme.text_dim));
-                    });
-                    for column in &result.columns {
-                        header.col(|ui| {
-                            ui.add(
-                                egui::Label::new(RichText::new(&column.name).strong()).truncate(),
-                            )
-                            .on_hover_text(format!(
-                                "{} · {}",
-                                column.name,
-                                column.type_name.to_lowercase()
-                            ));
-                        });
-                    }
-                })
-                .body(|body| {
-                    body.rows(ROW_HEIGHT, result.rows.len(), |mut row| {
-                        let index = row.index();
-                        row.col(|ui| {
-                            ui.label(
-                                RichText::new((index + 1).to_string())
-                                    .small()
-                                    .color(theme.text_dim),
-                            );
-                        });
-                        for value in &result.rows[index] {
-                            row.col(|ui| cell(ui, theme, value.as_deref()));
-                        }
-                    });
-                });
-        });
-}
+                .clicked()
+            {
+                export = true;
+            }
+            super::export::format_combo(ui, ("copy_format", tab.id), format, 150.0);
+            ui.label(RichText::new("Copy as").color(theme.text_dim))
+                .on_hover_text(
+                    "The format Ctrl+C copies in.
 
-fn cell(ui: &mut egui::Ui, theme: &Theme, value: Option<&str>) {
-    let Some(value) = value else {
-        ui.label(
-            RichText::new("NULL")
-                .italics()
-                .color(theme.text_dim.gamma_multiply(0.8)),
-        );
-        return;
-    };
-    // One line in the grid; the rest shows when the pointer rests on it.
-    let first_line = value.lines().next().unwrap_or("");
-    let cut = first_line.len() < value.len();
-    let shown = if cut {
-        format!("{first_line} …")
-    } else {
-        first_line.to_string()
-    };
-    let label = ui.add(egui::Label::new(shown).truncate());
-    let label = if cut || value.len() > 24 {
-        let hover: String = value.chars().take(HOVER_CHARS).collect();
-        label.on_hover_text(hover)
-    } else {
-        label
-    };
-    label.context_menu(|ui| {
-        if ui.button("Copy value").clicked() {
-            ui.ctx().copy_text(value.to_string());
-            ui.close();
-        }
+                     Click a cell to select it; drag or Shift+click for more.
+                     A row number selects the row, a column name the column.
+                     Double-click copies a cell. Right-click for the rest.",
+                );
+            // What is left, for the notes about the result.
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                if let Some(copied) = tab.grid.copied() {
+                    ui.label(RichText::new(copied).color(theme.ok));
+                } else if result.limit_reached {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!(
+                                "Stopped at the limit of {} rows. The table may have more.",
+                                result.limit
+                            ))
+                            .color(theme.warn),
+                        )
+                        .truncate(),
+                    )
+                    .on_hover_text(
+                        "Export… can write all rows to a file: it runs the query again \
+                         without the row limit.",
+                    );
+                } else if let Some(added) = &result.added {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("dbpadu added {added} to your SQL."))
+                                .color(theme.text_dim),
+                        )
+                        .truncate(),
+                    );
+                }
+            });
+        });
     });
+    export
 }

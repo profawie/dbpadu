@@ -3,6 +3,11 @@ package io.github.profawie.dbpadu.engine;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.Clob;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
@@ -109,22 +114,108 @@ final class Session {
         return result;
     }
 
-    private static void readRows(ResultSet rows, int limit, JsonObject result) throws SQLException {
-        ResultSetMetaData meta = rows.getMetaData();
-        int count = meta.getColumnCount();
+    /**
+     * Runs a SELECT as it is written, without the row limit, and writes
+     * every row to a file: one JSON value per line, first
+     * {@code {"columns": [...]}}, then one list of values per row. The rows
+     * go from the database to the file a few at a time, so the size of the
+     * result does not matter to the engine's memory.
+     *
+     * <p>Only a plain SELECT is accepted: this is a second run of SQL the
+     * user ran before, and it must not change data again.
+     */
+    JsonObject export(String sql, String file) throws SQLException {
+        String select = LimitGuard.forExport(sql == null ? "" : sql, kind);
+        if (select == null) {
+            throw new SQLException(
+                "Only a SELECT can be exported with all its rows, because the SQL runs again.");
+        }
+        Path path = Path.of(file);
+        long started = System.nanoTime();
+        long count = 0;
+        // PostgreSQL only hands a result over in pieces inside a transaction.
+        boolean borrowed = "postgres".equals(kind) && connection.getAutoCommit();
+        if (borrowed) {
+            connection.setAutoCommit(false);
+        }
+        boolean done = false;
+        try (Statement statement = connection.createStatement(
+                ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY)) {
+            // MySQL's driver reads row by row only when asked this way.
+            statement.setFetchSize("mysql".equals(kind) ? Integer.MIN_VALUE : 1_000);
+            running = statement;
+            try (ResultSet rows = statement.executeQuery(select);
+                    BufferedWriter out = Files.newBufferedWriter(path, StandardCharsets.UTF_8)) {
+                ResultSetMetaData meta = rows.getMetaData();
+                int columns = meta.getColumnCount();
+                JsonObject head = new JsonObject();
+                head.add("columns", columns(meta));
+                out.write(head.toString());
+                out.write('\n');
+                while (rows.next()) {
+                    JsonArray row = new JsonArray();
+                    for (int i = 1; i <= columns; i++) {
+                        String text = cell(rows, i, Integer.MAX_VALUE);
+                        if (text == null) {
+                            row.add(JsonNull.INSTANCE);
+                        } else {
+                            row.add(text);
+                        }
+                    }
+                    out.write(row.toString());
+                    out.write('\n');
+                    count++;
+                }
+            }
+            done = true;
+        } catch (IOException problem) {
+            throw new SQLException("The rows could not be written to a file: " + problem.getMessage());
+        } finally {
+            running = null;
+            if (borrowed) {
+                try {
+                    connection.rollback();
+                } catch (SQLException ignored) {
+                    // Nothing was changed.
+                }
+                connection.setAutoCommit(true);
+            }
+            if (!done) {
+                try {
+                    Files.deleteIfExists(path);
+                } catch (IOException ignored) {
+                    // The app removes it too.
+                }
+            }
+        }
+        JsonObject result = new JsonObject();
+        result.addProperty("rows", count);
+        result.addProperty("elapsedMs", (System.nanoTime() - started) / 1_000_000);
+        result.add("tx", tx());
+        return result;
+    }
+
+    private static JsonArray columns(ResultSetMetaData meta) throws SQLException {
         JsonArray columns = new JsonArray();
-        for (int i = 1; i <= count; i++) {
+        for (int i = 1; i <= meta.getColumnCount(); i++) {
             JsonObject column = new JsonObject();
             column.addProperty("name", meta.getColumnLabel(i));
             column.addProperty("type", meta.getColumnTypeName(i));
             columns.add(column);
         }
+        return columns;
+    }
+
+    private static void readRows(ResultSet rows, int limit, JsonObject result) throws SQLException {
+        ResultSetMetaData meta = rows.getMetaData();
+        int count = meta.getColumnCount();
+        JsonArray columns = columns(meta);
         JsonArray data = new JsonArray();
         int read = 0;
         while (read < limit && rows.next()) {
             JsonArray row = new JsonArray();
             for (int i = 1; i <= count; i++) {
-                String text = cell(rows, i);
+                String text = cell(rows, i, MAX_CELL_CHARS);
                 if (text == null) {
                     row.add(JsonNull.INSTANCE);
                 } else {
@@ -141,7 +232,7 @@ final class Session {
         result.addProperty("limitReached", read >= limit);
     }
 
-    private static String cell(ResultSet rows, int index) throws SQLException {
+    private static String cell(ResultSet rows, int index, int maxChars) throws SQLException {
         Object value;
         try {
             value = rows.getObject(index);
@@ -157,12 +248,12 @@ final class Session {
         String text;
         if (value instanceof Clob clob) {
             long length = clob.length();
-            text = clob.getSubString(1, (int) Math.min(length, MAX_CELL_CHARS + 1));
+            text = clob.getSubString(1, (int) Math.min(length, (long) maxChars + 1));
         } else {
             text = String.valueOf(value);
         }
-        if (text.length() > MAX_CELL_CHARS) {
-            return text.substring(0, MAX_CELL_CHARS) + "… [cut, " + text.length() + " characters]";
+        if (text.length() > maxChars) {
+            return text.substring(0, maxChars) + "… [cut, " + text.length() + " characters]";
         }
         return text;
     }

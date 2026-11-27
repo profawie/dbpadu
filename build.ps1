@@ -14,9 +14,9 @@
     everything in dist\, where the files stay together:
 
       dbpadu.exe            the program, which only opens the window
-      dbpadu_ui.dll, dbpadu_engine.dll, dbpadu_core.dll
+      dbpadu_ui.dll, dbpadu_engine.dll, dbpadu_export.dll, dbpadu_core.dll
                             the app's own libraries
-      std-....dll           Rust's standard library, shared by the three,
+      std-....dll           Rust's standard library, shared by all of them,
                             with libgcc_s_seh-1.dll and libwinpthread-1.dll
       dbpadu-engine.jar     the Java query engine, one file
 
@@ -148,7 +148,7 @@ New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
 $release = "target\$Target\release"
 $files = @("$release\$App.exe") + @(Get-ChildItem -Path "$release\${App}_*.dll" | ForEach-Object { $_.FullName })
-if ($files.Count -lt 4) { Fail "the app's libraries (${App}_*.dll) were not built in $release" }
+if ($files.Count -lt 5) { Fail "the app's libraries (${App}_*.dll) were not built in $release" }
 
 # Rust's standard library as a DLL: the app's libraries share this one copy.
 $libDir = (& rustc "+$Toolchain" --print target-libdir --target $Target | Out-String).Trim()

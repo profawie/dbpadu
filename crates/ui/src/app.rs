@@ -4,6 +4,8 @@
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
+    path::PathBuf,
+    sync::mpsc::{self, Receiver},
     time::Instant,
 };
 
@@ -19,15 +21,18 @@ use dbpadu_core::{
 use dbpadu_engine::{
     Engine, Event, locate,
     protocol::{
-        self, Connected, Driver, Hello, JumpTarget, OwnDriverInfo, QueryResult, Request, Routine,
-        Routines, Schemas, Sequences, SshTarget, Table, TableColumn, TableColumns, Tables, Target,
-        TxAnswer, TxState,
+        self, Connected, Driver, Exported, Hello, JumpTarget, OwnDriverInfo, QueryResult, Request,
+        Routine, Routines, Schemas, Sequences, SshTarget, Table, TableColumn, TableColumns, Tables,
+        Target, TxAnswer, TxState,
     },
 };
 
 use crate::{
     theme::Theme,
-    ui::{self, drivers::DriverEditor, editor::ConnectionEditor, home::GroupDialog},
+    ui::{
+        self, drivers::DriverEditor, editor::ConnectionEditor, export::ExportDialog,
+        grid::GridState, home::GroupDialog,
+    },
 };
 
 /// Lines kept in each log; the oldest go first.
@@ -142,7 +147,26 @@ pub enum Outcome {
 
 pub struct Running {
     pub since: Instant,
+    /// Every row is being written to a file; the result on screen stays.
+    pub exporting: bool,
 }
+
+/// An export of every row, from the request to the file.
+struct ExportJob {
+    tab: u64,
+    /// The connection's name and the SQL, for the log.
+    name: String,
+    statement: String,
+    /// Where the engine writes the rows.
+    rows: PathBuf,
+    /// The file the user asked for.
+    target: PathBuf,
+    format: dbpadu_export::Format,
+    options: dbpadu_export::Options,
+}
+
+/// How an export of every row ended: the rows written, and the file.
+type ExportDone = (Result<u64, String>, PathBuf);
 
 /// One query tab: an SQL editor and the result under it.
 pub struct QueryTab {
@@ -158,8 +182,14 @@ pub struct QueryTab {
     pub limit: u32,
     pub running: Option<Running>,
     pub outcome: Option<Outcome>,
+    /// The SQL the outcome came from, as the user wrote it.
+    pub statement: String,
     /// Counts the runs, so each result gets fresh column widths.
     pub runs: u32,
+    /// What is selected in the result grid.
+    pub grid: GridState,
+    /// The table and key columns the SQL formats write, for this result.
+    pub extract: dbpadu_export::Options,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -180,6 +210,8 @@ enum Pending {
     Connect(Uuid),
     /// A run of a tab: the connection's name and the SQL, for the log.
     Execute(u64, String, String),
+    /// Every row of a result, on its way to a file.
+    Export(Box<ExportJob>),
     /// A change of the transaction, with what to call it in the log.
     Tx(Uuid, &'static str),
     Schemas(Uuid),
@@ -262,6 +294,10 @@ pub struct App {
     probes: u64,
     /// The box that names a new group or renames one, while it is open.
     pub group_dialog: Option<GroupDialog>,
+    /// The Export box, while it is open.
+    pub export: Option<ExportDialog>,
+    /// Exports whose file is being written.
+    exports: Vec<Receiver<ExportDone>>,
 }
 
 /// The time of day, for a log line.
@@ -371,6 +407,8 @@ impl App {
             driver_kind: None,
             probes: 0,
             group_dialog: None,
+            export: None,
+            exports: Vec::new(),
         };
         app.start_engine();
         app
@@ -538,7 +576,8 @@ impl App {
         self.pending.clear();
         self.links.clear();
         for tab in &mut self.tabs {
-            if tab.running.take().is_some() {
+            // An export leaves the result on screen as it is.
+            if tab.running.take().is_some_and(|running| !running.exporting) {
                 tab.outcome = Some(Outcome::Error("The engine was restarted.".to_string()));
             }
         }
@@ -611,7 +650,8 @@ impl App {
         self.pending.clear();
         self.links.clear();
         for tab in &mut self.tabs {
-            if tab.running.take().is_some() {
+            // An export leaves the result on screen as it is.
+            if tab.running.take().is_some_and(|running| !running.exporting) {
                 tab.outcome = Some(Outcome::Error(
                     "The engine stopped while this was running.".to_string(),
                 ));
@@ -691,21 +731,81 @@ impl App {
                         result.executed_sql.clone(),
                         Ok(ui::statusbar::summary(result)),
                     ),
-                    Err(err) => self.log_sql(name, statement, Err(err.clone())),
+                    Err(err) => self.log_sql(name, statement.clone(), Err(err.clone())),
                 }
                 let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
                     return;
                 };
                 tab.running = None;
                 tab.runs += 1;
+                tab.grid = GridState::default();
                 match result {
                     Ok(result) => {
                         if let Some(link) = self.links.get_mut(&tab.connection) {
                             link.tx = result.tx;
                         }
+                        let quote = match self.data.connection(tab.connection).map(|c| c.kind) {
+                            Some(DbKind::MySql | DbKind::MariaDb) => dbpadu_export::Quote::Backtick,
+                            Some(DbKind::SqlServer) => dbpadu_export::Quote::Bracket,
+                            _ => dbpadu_export::Quote::Double,
+                        };
+                        tab.extract = dbpadu_export::Options {
+                            table: dbpadu_export::guess_table(&statement).unwrap_or_default(),
+                            quote,
+                            ..Default::default()
+                        };
+                        tab.statement = statement;
                         tab.outcome = Some(Outcome::Result(result));
                     }
                     Err(err) => tab.outcome = Some(Outcome::Error(err)),
+                }
+            }
+            Pending::Export(job) => {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == job.tab) {
+                    tab.running = None;
+                }
+                match result.and_then(protocol::read::<Exported>) {
+                    Ok(exported) => {
+                        if let Some(link) = self
+                            .tabs
+                            .iter()
+                            .find(|tab| tab.id == job.tab)
+                            .and_then(|tab| self.links.get_mut(&tab.connection))
+                        {
+                            link.tx = exported.tx;
+                        }
+                        self.log_sql(
+                            job.name,
+                            job.statement,
+                            Ok(format!(
+                                "{} read for {} · {}",
+                                ui::count(exported.rows as usize, "row", "rows"),
+                                job.target.display(),
+                                ui::duration(exported.elapsed_ms)
+                            )),
+                        );
+                        // Writing the file can take a while: not here.
+                        let (sender, receiver) = mpsc::channel();
+                        let ctx = self.ctx.clone();
+                        let (rows, target, format, options) =
+                            (job.rows, job.target, job.format, job.options);
+                        std::thread::spawn(move || {
+                            let written = dbpadu_export::convert(&rows, &target, format, &options)
+                                .map_err(|err| err.to_string());
+                            let _ = std::fs::remove_file(&rows);
+                            let _ = sender.send((written, target));
+                            ctx.request_repaint();
+                        });
+                        self.exports.push(receiver);
+                    }
+                    Err(err) => {
+                        let _ = std::fs::remove_file(&job.rows);
+                        self.log_sql(job.name, job.statement, Err(err.clone()));
+                        self.notice = Some(Notice {
+                            text: format!("The export did not finish: {err}"),
+                            error: true,
+                        });
+                    }
                 }
             }
             Pending::Tx(id, what) => {
@@ -1267,7 +1367,10 @@ impl App {
             limit: self.data.settings.row_limit,
             running: None,
             outcome: None,
+            statement: String::new(),
             runs: 0,
+            grid: GridState::default(),
+            extract: dbpadu_export::Options::default(),
         });
         self.view = View::Tab(id);
         id
@@ -1323,8 +1426,85 @@ impl App {
         if self.request(request, Pending::Execute(tab_id, name, statement)) {
             self.tab_mut(tab_id).running = Some(Running {
                 since: Instant::now(),
+                exporting: false,
             });
         }
+    }
+
+    /// Write every row of a tab's result to a file: the SQL runs again as
+    /// the user wrote it, without the row limit, and the rows go from the
+    /// database to the file without being held in memory.
+    pub fn export_all(
+        &mut self,
+        tab_id: u64,
+        target: PathBuf,
+        format: dbpadu_export::Format,
+        options: dbpadu_export::Options,
+    ) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        if tab.running.is_some() {
+            return;
+        }
+        let connection = tab.connection;
+        if !self.links.get(&connection).is_some_and(Link::connected) {
+            self.notify("Connect first: the export reads the rows from the database.".to_string());
+            return;
+        }
+        let statement = tab.statement.clone();
+        let rows = std::env::temp_dir().join(format!("dbpadu-export-{}.jsonl", Uuid::new_v4()));
+        let request =
+            protocol::export(&connection.to_string(), &statement, &rows.to_string_lossy());
+        let job = ExportJob {
+            tab: tab_id,
+            name: self.connection_name(connection),
+            statement,
+            rows,
+            target,
+            format,
+            options,
+        };
+        if self.request(request, Pending::Export(Box::new(job))) {
+            self.tab_mut(tab_id).running = Some(Running {
+                since: Instant::now(),
+                exporting: true,
+            });
+        }
+    }
+
+    /// Tell how the exports that were writing their file ended.
+    fn poll_exports(&mut self) {
+        let mut done = Vec::new();
+        self.exports.retain(|export| match export.try_recv() {
+            Ok(result) => {
+                done.push(result);
+                false
+            }
+            Err(mpsc::TryRecvError::Empty) => true,
+            Err(mpsc::TryRecvError::Disconnected) => false,
+        });
+        for (written, target) in done {
+            self.export_done(written, &target);
+        }
+    }
+
+    /// Say in the bar at the top how an export ended.
+    pub fn export_done(&mut self, written: Result<u64, String>, target: &std::path::Path) {
+        self.notice = Some(match written {
+            Ok(rows) => Notice {
+                text: format!(
+                    "Exported {} to {}",
+                    ui::count(rows as usize, "row", "rows"),
+                    target.display()
+                ),
+                error: false,
+            },
+            Err(err) => Notice {
+                text: format!("{} could not be written: {err}", target.display()),
+                error: true,
+            },
+        });
     }
 
     fn tab_mut(&mut self, id: u64) -> &mut QueryTab {
@@ -1380,6 +1560,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.follow_system_appearance();
         self.poll_engine();
+        self.poll_exports();
         let theme = self.theme;
 
         if self.tabs.iter().any(|tab| tab.running.is_some()) {
@@ -1498,5 +1679,6 @@ impl eframe::App for App {
         ui::drivers::editor(self, ui.ctx());
         ui::editor::password_prompt(self, ui.ctx());
         ui::home::group_dialog(self, ui.ctx());
+        ui::export::dialog(self, ui.ctx());
     }
 }

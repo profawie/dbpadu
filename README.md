@@ -4,13 +4,14 @@
 
 A friendly desktop database client. The app is written in Rust; the query engine is written in Java and talks to databases through JDBC. Runs on Windows, macOS and Linux.
 
-Version: 0.2.1
+Version: 0.3.0
 
 | Connections | A query |
 | --- | --- |
 | ![One card for each connection](docs/connections.png) | ![A formatted query, its result and the status bar](docs/query.png) |
 | ![Rows of a table, opened from the tree](docs/table.png) | ![The connection form](docs/new-connection.png) |
 | ![The Drivers page: every driver by name and version](docs/drivers.png) | ![The driver form](docs/driver-form.png) |
+| ![A block of cells selected in the result, and the formats it can be copied in](docs/grid-copy.png) | ![The Export box](docs/export.png) |
 | ![Settings](docs/settings.png) | |
 
 ## Features
@@ -32,7 +33,10 @@ Version: 0.2.1
 | **A SELECT is always limited** (see [Row limit](#row-limit)) | Done |
 | SQL editor with colors; Run the statement at the cursor or the selected text (Ctrl+Enter or F5); Stop a running query | Done |
 | Format SQL (Ctrl+Shift+F) | Done |
-| Result grid with resizable columns, row numbers, NULL shown apart, copy a value | Done |
+| Result grid with resizable columns, row numbers, NULL shown apart | Done |
+| Select in the grid like in a spreadsheet and copy with Ctrl+C: a cell, a block of cells, whole rows, whole columns (see [Copy and export](#copy-and-export)) | Done |
+| Copy and export in 14 formats: TSV, CSV, semicolon- and pipe-separated, SQL INSERT (one row or many rows per statement), SQL UPDATE, WHERE clause, one line for `IN (…)`, JSON, XML, HTML, Markdown and a text table | Done |
+| Export every row of a query to a file, past the row limit, without holding the rows in memory | Done |
 | Log at the bottom, read-only: the SQL as it was sent with its result, and what the engine said; Copy all, Clear, Hide | Done |
 | Status bar: result and time, the SQL as it was really sent with what dbpadu added marked, the transaction, the log switch, and the engine at the far right | Done |
 | Transactions: Auto-commit on or off for each connection, Commit and Rollback | Done |
@@ -40,7 +44,7 @@ Version: 0.2.1
 | Settings: dark, light or system look, max rows of a new tab, the Java to run the engine with | Done |
 | About: versions, the drivers in use, where the files are | Done |
 | App icon: the window, the Windows program and the macOS app | Done |
-| Edit cells in the grid, export results, query history | Planned |
+| Edit cells in the grid, query history | Planned |
 
 ## Row limit
 
@@ -49,7 +53,51 @@ A table can hold more rows than a computer has memory for, so dbpadu never asks 
 1. **The SQL gets a limit.** When a SELECT has no row limit of its own, the engine adds one in the database's own words: `LIMIT 500` (PostgreSQL, MySQL, MariaDB, SQLite), `TOP (500)` (SQL Server) or `FETCH FIRST 500 ROWS ONLY` (Oracle). The status bar shows the SQL as it was sent, with the added part in another color, and the line above the result says so too.
 2. **The driver stops at the limit.** Every statement runs with JDBC's `setMaxRows`. This covers the SQL the first guard leaves alone (a query that starts with a bracket, `SELECT … FOR UPDATE`, a `UNION` on SQL Server) and a limit you typed that is larger than the tab's.
 
-The limit is chosen per tab with **Max rows** (100 to 10,000; 500 to start with). The engine refuses more than 10,000 rows whatever it is asked, cuts a single value at 10,000 characters and runs with at most 512 MB of memory. When a result stops at the limit, the line above it says the table may have more.
+The limit is chosen per tab with **Max rows** (100 to 10,000; 500 to start with). The engine refuses more than 10,000 rows whatever it is asked, cuts a single value at 10,000 characters and runs with at most 512 MB of memory. When a result stops at the limit, the line above it says the table may have more. To get every row, use [Export to a file](#export-to-a-file): the rows then go to a file, not to the grid.
+
+## Copy and export
+
+### Selecting and copying
+
+The result grid is selected like a spreadsheet:
+
+| Do this | To select |
+| --- | --- |
+| Click a cell | That cell |
+| Drag, or Shift+click another cell | A block of cells |
+| Click a row number (drag or Shift+click for more) | Whole rows |
+| Click a column name | The whole column |
+| Click `#`, or press Ctrl+A | Everything |
+| Arrow keys, Page Up, Page Down; with Shift to stretch the selection | Move from the selected cell |
+
+**Ctrl+C** copies the selection, and **Ctrl+Shift+C** copies it with the column names as its first line. One cell is copied as its plain value; a double-click on a cell copies it too. More than one cell is copied in the format chosen in **Copy as** above the grid. It starts as TSV (tabs), which pastes straight into the cells of Excel, LibreOffice and Google Sheets; a value with a tab or a line break in it is quoted so that it stays in one cell.
+
+A right-click on the grid has the rest: copy the whole rows of the selection, the column name, or **Copy as** in any one format without changing the usual one. For example, select the cells of an `id` column and choose **Copy as › WHERE clause** to get `WHERE id IN (3, 7, 12)`, or select rows and choose **SQL INSERT** to paste them into another database.
+
+The grid shows results and is not edited, so there is nothing to paste into it; what is copied is made to paste well elsewhere.
+
+### Formats
+
+| Group | Formats |
+| --- | --- |
+| Separated values | TSV (tabs), CSV (commas), semicolon-separated, pipe-separated; the first line with the column names can be left out |
+| SQL | `INSERT` with one row per statement, `INSERT` with up to 500 rows per statement, `UPDATE`, a `WHERE` clause that finds the rows again, and the values on one line for `IN (…)` |
+| Data | JSON (a list of objects), XML, HTML (a page with one table) |
+| Text | Markdown table, text table drawn with `+`, `-` and `\|` |
+
+Numbers and booleans are written without quotes in SQL and JSON, text with them (a `'` in SQL text is doubled), a NULL as `NULL` or `null`, and a JSON column as the JSON it holds. Column names are quoted only when they need it, in the way of the database of the connection: `"Paid At"`, `` `Paid At` `` on MySQL and MariaDB, `[Paid At]` on SQL Server.
+
+The SQL formats name a table. It is read from the `FROM` of the query, and can be changed in the Export box. An `UPDATE` finds its row by **key columns**, ticked in the Export box; when none is ticked, the column called `id` is used, and without one every column. Key columns are written even when they are not among the selected cells, so selecting a few cells of the `amount` column gives `UPDATE orders SET amount = 26.74 WHERE id = 2;`.
+
+### Export to a file
+
+**Export…** above the grid (or in the right-click menu) opens the Export box: choose the format and which rows, see the first rows as they will be written, then **Save to file…** or **Copy**.
+
+The rows are one of:
+
+- **The selection**, when more than one cell is selected.
+- **The rows in the grid.**
+- **All rows**, offered when the result stopped at the row limit. The SELECT runs again as you wrote it, without the limit dbpadu added, and the rows go from the database to the file a few at a time: they never fill the grid or the memory, so the [row limit](#row-limit) keeps its promise and a table of any size can be exported. The toolbar shows the time while it runs, **Stop** ends it, and a bar at the top says when the file is written. Only a plain SELECT is run again; SQL that changes data is refused, because it would change the data a second time. A limit you wrote yourself in the SQL still counts.
 
 ## SSH
 
@@ -92,6 +140,8 @@ app    → {"id": 7, "op": "execute", "session": "…", "sql": "select * from t"
 engine → {"id": 7, "ok": true, "result": {"executedSql": "select * from t\nLIMIT 500", "added": "LIMIT 500", …}}
 ```
 
+An export of every row is the one request whose rows do not come back this way: the engine writes them to a temporary file, one JSON line per row, and the app turns that file into the format that was asked for and removes it.
+
 The engine status at the bottom right says whether it is ready. If it stopped, click the status to start it again; rest the pointer on it for the reason. What the engine writes to its error output is shown in the **Engine** log.
 
 ## Build and run
@@ -117,8 +167,8 @@ The build scripts build the engine (its tests run too) and a release of the app.
 | File | What it is |
 | --- | --- |
 | `dbpadu.exe` (`dbpadu` on Linux) | The program. It only opens the window |
-| `dbpadu_ui.dll`, `dbpadu_engine.dll`, `dbpadu_core.dll` (`libdbpadu_….so` on Linux, `.dylib` on macOS) | The app's own libraries, one for each crate in `crates/` |
-| `std-….dll` (`libstd-….so`), and on Windows `libgcc_s_seh-1.dll` and `libwinpthread-1.dll` | Rust's standard library, which the three libraries share |
+| `dbpadu_ui.dll`, `dbpadu_engine.dll`, `dbpadu_export.dll`, `dbpadu_core.dll` (`libdbpadu_….so` on Linux, `.dylib` on macOS) | The app's own libraries, one for each crate in `crates/` |
+| `std-….dll` (`libstd-….so`), and on Windows `libgcc_s_seh-1.dll` and `libwinpthread-1.dll` | Rust's standard library, which the libraries share |
 | `dbpadu-engine.jar` | The Java query engine, one file |
 
 The files stay together in one folder. The libraries and the program are built by the same Rust compiler and only fit each other: replace them all together.
@@ -157,7 +207,7 @@ cargo test                    # the app and its crates
 cd engine && ./mvnw test      # the engine
 ```
 
-`cargo test` also starts the real engine against a SQLite file when the engine is built, connects through a driver loaded from a `.jar` file of its own, and checks that the app and the engine have the same version.
+`cargo test` also starts the real engine against a SQLite file when the engine is built, connects through a driver loaded from a `.jar` file of its own, and runs an export of every row, and checks that the app and the engine have the same version.
 
 ## Code layout
 
@@ -166,10 +216,11 @@ cd engine && ./mvnw test      # the engine
 | `dbpadu` (`src/`) | The program: a few lines that open the window |
 | `dbpadu-ui` (`crates/ui`) | The window: cards and groups, tabs, tree, query tabs, log, status bar, Drivers, Settings, About, themes. Built with [egui/eframe](https://github.com/emilk/egui) |
 | `dbpadu-engine` (`crates/engine`) | Starts the Java engine and talks to it |
+| `dbpadu-export` (`crates/export`) | Writes a result as CSV, SQL, JSON, XML, HTML, Markdown or text, row by row, for the clipboard and for files. Knows nothing about windows or databases |
 | `dbpadu-core` (`crates/core`) | Saved connections, groups, drivers and settings, saved passwords, URL templates, SQL formatting, finding the statement at the cursor |
 | The engine (`engine/`) | Java: connections, SSH tunnels, drivers, running SQL, the row limit, transactions, reading schemas, tables, routines and sequences |
 
-Each crate in `crates/` is built as a shared library (`crate-type = ["dylib"]`), not linked into one program; only the Java engine is one file. They form a chain, `dbpadu` → `dbpadu-ui` → `dbpadu-engine` → `dbpadu-core`, so each third-party library is inside exactly one of them. `.cargo/config.toml` makes Rust's standard library a shared library too and tells the program to look for its libraries in its own folder.
+Each crate in `crates/` is built as a shared library (`crate-type = ["dylib"]`), not linked into one program; only the Java engine is one file. `dbpadu` uses `dbpadu-ui`, which uses `dbpadu-engine` and `dbpadu-export`, which both use `dbpadu-core`, so each third-party library is inside exactly one of them. `.cargo/config.toml` makes Rust's standard library a shared library too and tells the program to look for its libraries in its own folder.
 
 Third-party Rust libraries are declared once, under `[workspace.dependencies]` in the root `Cargo.toml`; the engine's are in `engine/pom.xml`. The version is in both files and must be the same.
 

@@ -750,6 +750,11 @@ pub struct Settings {
     pub drivers: BTreeMap<DbKind, OwnDriver>,
     /// Whether the log panel at the bottom is open.
     pub log_open: bool,
+    /// The format Ctrl+C in the result grid copies in, by its name in the
+    /// export library. Empty: the first one (tabs, for spreadsheets).
+    pub copy_format: String,
+    /// The format the Export box opens with, the same way.
+    pub export_format: String,
 }
 
 /// How version 0.1.1 kept a JDBC driver of the user's choosing.
@@ -818,6 +823,8 @@ impl Default for Settings {
             java_path: String::new(),
             drivers: BTreeMap::new(),
             log_open: true,
+            copy_format: String::new(),
+            export_format: String::new(),
         }
     }
 }

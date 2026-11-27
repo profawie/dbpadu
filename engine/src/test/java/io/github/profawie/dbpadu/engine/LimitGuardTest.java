@@ -109,4 +109,28 @@ class LimitGuardTest {
     void unknownDatabaseIsLeftToTheEngineGuard() {
         assertFalse(LimitGuard.apply("select * from t", "other", 500).changed());
     }
+
+    @Test
+    void onlyAPlainSelectIsRunAgainForAnExport() {
+        assertEquals("select * from t", LimitGuard.forExport("select * from t;", "postgres"));
+        assertEquals(
+            "with x as (select 1) select * from x",
+            LimitGuard.forExport("with x as (select 1) select * from x -- all", "postgres"));
+        assertEquals(
+            "(select 1) union (select 2)",
+            LimitGuard.forExport("(select 1) union (select 2)", "mysql"));
+        // The limit the user wrote stays.
+        assertEquals("select * from t limit 5", LimitGuard.forExport("select * from t limit 5", "sqlite"));
+        // A word that changes data in a string is only text.
+        assertEquals(
+            "select 'delete' from t", LimitGuard.forExport("select 'delete' from t", "postgres"));
+
+        assertNull(LimitGuard.forExport("update t set a = 1", "postgres"));
+        assertNull(LimitGuard.forExport("delete from t returning *", "postgres"));
+        assertNull(LimitGuard.forExport(
+            "with gone as (delete from t returning *) select * from gone", "postgres"));
+        assertNull(LimitGuard.forExport("select * into copy from t", "sqlserver"));
+        assertNull(LimitGuard.forExport("call cleanup()", "mysql"));
+        assertNull(LimitGuard.forExport("  -- nothing", "postgres"));
+    }
 }

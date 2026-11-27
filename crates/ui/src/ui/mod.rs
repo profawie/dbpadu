@@ -3,6 +3,8 @@
 pub mod about;
 pub mod drivers;
 pub mod editor;
+pub mod export;
+pub mod grid;
 pub mod highlight;
 pub mod home;
 pub mod log;
